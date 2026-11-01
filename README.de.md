@@ -1,5 +1,7 @@
 # Babylon Infernalis
 
+Dieses Projekt habe ich unter großer Mithilfe von Claude Code realisiert.
+
 Ein nativer Windows-Port von **Indiana Jones and the Infernal Machine** für das Nintendo 64, erstellt mit
 [N64: Recompiled](https://github.com/N64Recomp/N64Recomp). Der MIPS-Code des Spiels wird statisch nach C übersetzt
 und läuft direkt auf dem PC; die Grafik zeichnet [RT64](https://github.com/rt64/rt64).
