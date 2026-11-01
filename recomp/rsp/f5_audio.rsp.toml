@@ -1,0 +1,17 @@
+# RSPRecomp config for the Factor 5 audio microcode (audio_task_submit: OSTask type 2, rspboot, ucode 0x1000).
+# rspboot copies the text to IMEM 0x1080; IMEM ends at 0x2000, so at most 0xF80 bytes are used.
+text_offset = 0x3A630      # ROM offset of f5_audio_ucode_text (RAM 0x40039A30)
+text_size = 0xF80
+text_address = 0x04001080
+rom_file_path = "../../rom/indy.z64"
+output_file_path = "../../indy64recomp/rsp/f5_audio_ucode.cpp"
+output_function_name = "f5_audio_ucode"
+
+# The microcode DMAs code into IMEM 0x680 while it runs (seen at runtime, offsets relative to the ucode start):
+# 0x600 (0x918 bytes, the same code that rspboot loaded) and 0xF20 (0x1A4 bytes, code past the initial image).
+[[overlay_slots]]
+text_address = 0x04001680
+overlays = [
+    { offset = 0x600, size = 0x918 },
+    { offset = 0xF20, size = 0x1A4 },
+]

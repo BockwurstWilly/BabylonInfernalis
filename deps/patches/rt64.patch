@@ -1,0 +1,2133 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2fb01e5..3fa50a0 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -37,7 +37,11 @@ endfunction()
+ 
+ if (WIN32)
+     set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+-    add_compile_definitions(NOMINMAX)
++    # __PRFCHWINTRIN_H: SDL 2.26's SDL_endian.h redefines _m_prefetch, which newer clang rejects (fix from newer RT64).
++    add_compile_definitions(
++        NOMINMAX
++        __PRFCHWINTRIN_H
++    )
+ 
+     # Dependencies that must be next to the DLL.
+     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
+@@ -328,6 +332,7 @@ set (SOURCES
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dpd.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dwave.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dzex2.cpp"
++    "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f5indi.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_l3dex2.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_rdp.cpp"
+     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_s2dex.cpp"
+diff --git a/src/common/rt64_emulator_configuration.cpp b/src/common/rt64_emulator_configuration.cpp
+index 303113d..17da793 100644
+--- a/src/common/rt64_emulator_configuration.cpp
++++ b/src/common/rt64_emulator_configuration.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include "rt64_emulator_configuration.h"
+ 
++#include <cstdlib>
++
+ namespace RT64 {
+     // EmulatorConfiguration
+ 
+diff --git a/src/gbi/rt64_gbi.cpp b/src/gbi/rt64_gbi.cpp
+index 7006549..1b560d6 100644
+--- a/src/gbi/rt64_gbi.cpp
++++ b/src/gbi/rt64_gbi.cpp
+@@ -15,6 +15,7 @@
+ #include "rt64_gbi_f3dex2.h"
+ #include "rt64_gbi_f3dwave.h"
+ #include "rt64_gbi_f3dzex2.h"
++#include "rt64_gbi_f5indi.h"
+ #include "rt64_gbi_l3dex2.h"
+ #include "rt64_gbi_rdp.h"
+ #include "rt64_gbi_s2dex.h"
+@@ -153,14 +154,15 @@ namespace RT64 {
+     const GBIInstance   L3DEX2_FIFO_ACCLAIM       = { "L3DEX2.fifo 2.05 (Acclaim)",                GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
+     const GBIInstance   L3DEX2_FIFO_2_08          = { "L3DEX2.fifo 2.08",                          GBIUCode::L3DEX2,      { false,  false,  false,  false,  false } }; // Needs confirmation.
+     const GBIInstance   ZSORTP_0_33               = { "ZSortp 0.33",                               GBIUCode::Unknown,     { false,  false,  false,  false,  false } }; // Needs confirmation.
+-    
++    const GBIInstance   F5_INDI                   = { "Factor 5 (Indiana Jones / Battle for Naboo)", GBIUCode::F5INDI,    { false,  false,  false,  false,  false } }; // Needs confirmation.
++
+     // ****************************************************************************************
+     // * Database of known UCode text and data segments.                                      *
+     // ****************************************************************************************
+     // 
+     //                  Length      Hash                    Known instances               
+     //     
+-    static std::array<GBISegment, 94> textSegments = {
++    static std::array<GBISegment, 95> textSegments = {
+             GBISegment{ 0x1408,     0x9C0926F5E466BE70ULL,  { &F3D_SDK_E } }, // Needs confirmation.
+             GBISegment{ 0x1400,     0x34EAA6E921BCF1B2ULL,  { &F3D_SDK_F, &F3D_SDK_UNKNOWN_G, &F3D_SDK_UNKNOWN_H } }, // Needs confirmation.
+             GBISegment{ 0x1408,     0x3E05E9BBE814C700ULL,  { &F3D_FIFO_SDK_E } }, // Needs confirmation.
+@@ -255,9 +257,11 @@ namespace RT64 {
+             GBISegment{ 0x1190,     0x019210E4F59B27C1ULL,  { &L3DEX2_FIFO_ACCLAIM } }, // Needs confirmation.
+             GBISegment{ 0x1190,     0x60B6BA671EE6F1F6ULL,  { &L3DEX2_FIFO_2_08 } }, // Needs confirmation.
+             GBISegment{ 0x10B0,     0xE8028E4BC6529E6EULL,  { &ZSORTP_0_33 } }, // Needs confirmation.
++            // Indiana Jones (USA), text at ROM 0x37DB0. Same text as GLideN64's CRC 0x6859BF8E. Needs confirmation for Naboo.
++            GBISegment{ 0x1000,     0x6326DDEF39B95B19ULL,  { &F5_INDI } },
+     };
+ 
+-    static std::array<GBISegment, 105> dataSegments = {
++    static std::array<GBISegment, 106> dataSegments = {
+             GBISegment{ 0x800,      0xEEB10D73400213B3ULL,  { &F3D_SDK_E } }, // Needs confirmation.
+             GBISegment{ 0x800,      0x49651E384B48F694ULL,  { &F3D_SDK_F } }, // Needs confirmation.
+             GBISegment{ 0x800,      0x1A736198F90E81C5ULL,  { &F3D_SDK_UNKNOWN_G } }, // Needs confirmation.
+@@ -363,6 +367,8 @@ namespace RT64 {
+             GBISegment{ 0x3F0,      0x772E4F4BD7F82DEFULL,  { &L3DEX2_FIFO_ACCLAIM } }, // Needs confirmation.
+             GBISegment{ 0x3F0,      0xE261C98A63863DB4ULL,  { &L3DEX2_FIFO_2_08 } }, // Needs confirmation.
+             GBISegment{ 0x400,      0x8F5D64011662220CULL,  { &ZSORTP_0_33 } }, // Needs confirmation.
++            // Indiana Jones (USA), data at ROM 0x48210 (0xF0 bytes up to the audio microcode data).
++            GBISegment{ 0xF0,       0xA7D53D8915E7AA44ULL,  { &F5_INDI } },
+     };
+ 
+     static bool textAndDataSegmentsSorted = false;
+@@ -499,6 +505,9 @@ namespace RT64 {
+             case GBIUCode::L3DEX2:
+                 GBI_L3DEX2::setup(&gbi);
+                 break;
++            case GBIUCode::F5INDI:
++                GBI_F5INDI::setup(&gbi);
++                break;
+             default:
+                 assert(false && "Unknown UCode.");
+                 break;
+@@ -507,6 +516,7 @@ namespace RT64 {
+ 
+         // Update the cached GBI to use the instance's flags.
+         gbi.flags = matchingInstance->flags;
++        fprintf(stderr, "[rt64] GBI: %s\n", matchingInstance->name);
+ 
+         return &gbi;
+     }
+diff --git a/src/gbi/rt64_gbi.h b/src/gbi/rt64_gbi.h
+index 69c35d2..983ff03 100644
+--- a/src/gbi/rt64_gbi.h
++++ b/src/gbi/rt64_gbi.h
+@@ -28,6 +28,7 @@ namespace RT64 {
+         S2DEX,
+         S2DEX2,
+         L3DEX2,
++        F5INDI,
+         Count
+     };
+ 
+@@ -59,6 +60,8 @@ namespace RT64 {
+         GBIUCode ucode = GBIUCode::Unknown;
+         GBIReset resetFromTask = nullptr;
+         GBIReset resetFromLoad = nullptr;
++        // Called once with the first command of a task's display list, before it runs (may advance it).
++        GBIFunction startDisplayList = nullptr;
+         GBIFunction map[UCODE_MAP_SIZE] = {};
+         std::unordered_map<F3DENUM, uint32_t> constants;
+         GBIFlags flags;
+diff --git b/src/gbi/rt64_gbi_f5indi.cpp b/src/gbi/rt64_gbi_f5indi.cpp
+new file mode 100644
+index 0000000..97dd0d0
+--- /dev/null
++++ b/src/gbi/rt64_gbi_f5indi.cpp
+@@ -0,0 +1,1600 @@
++//
++// RT64
++//
++// Factor 5 microcode of "Indiana Jones and the Infernal Machine" (also used by "Star Wars Episode I: Battle for
++// Naboo"). Port of GLideN64's src/uCodes/F5Indi_Naboo.cpp at commit a04081ad6a966a9413bea63a55f502e0dc98bb18.
++// Microcode decoding: olivieryuyu. GLideN64 is licensed under the GPL-2.0, so this file is too.
++//
++// Only the paths used by Indiana Jones are ported; the Naboo-only commands (geometry gen modes 0x09, 0x0C, 0x0F,
++// 0x15, 0x4F and command 0xBE) are left out.
++//
++// How the microcode works, compared to F3D:
++// - The microcode keeps a lot of state in its DMEM (lights, colors, texture coordinate matrices, the sub display
++//   list address, ...) and the commands read and write it directly. This port keeps a 4 KiB DMEM image in the same
++//   layout as GLideN64 (32-bit words in host order, so byte accesses use ^3 and halfword accesses ^1), which lets
++//   the DMEM arithmetic be ported line by line.
++// - Positions are loaded into vertex slots without color or texture coordinates. Each triangle command carries the
++//   colors (as offsets into the lit color buffer at DMEM 0xD40) and the texture coordinates for its corners, which
++//   are applied with RSP::modifyVertex; it copies a vertex that was already used by an earlier triangle.
++// - Display lists are built from chained blocks: every list starts with an 8-byte header whose first word points to
++//   the next block, and JUMPDL (0xB5) continues there. The current "next block" pointer is kept per nesting level.
++// - Some commands are longer than 8 bytes (TRI1/TRI2, TEXRECT, the geometry generators) and advance the display
++//   list themselves, as GLideN64 does with RSP.PC.
++
++#include "rt64_gbi_f5indi.h"
++
++#include <algorithm>
++#include <array>
++#include <cassert>
++#include <cmath>
++#include <cstring>
++#include <ctime>
++#include <vector>
++
++#include "common/rt64_common.h"
++#include "hle/rt64_interpreter.h"
++#include "hle/rt64_workload_queue.h"
++
++#include "rt64_f3d.h"
++#include "rt64_gbi_rdp.h"
++
++namespace RT64 {
++    // Bring-up aid from rt64_interpreter.cpp (INDY64_DUMP_DL).
++    extern FILE *displayListDumpFile;
++
++    namespace GBI_F5INDI {
++        enum : uint8_t {
++            F5INDI_SPNOOP = 0x00,
++            F5INDI_MOVEMEM = 0x01,
++            F5INDI_SET_DLIST_ADDR = 0x02,
++            F5INDI_GEOMETRY_GEN = 0x05,
++            F5INDI_DL = 0x06,
++            F5INDI_BRANCHDL = 0x07,
++            F5INDI_TRI2 = 0xB4,
++            F5INDI_JUMPDL = 0xB5,
++            F5INDI_CLEARGEOMETRYMODE = 0xB6,
++            F5INDI_SETGEOMETRYMODE = 0xB7,
++            F5INDI_ENDDL = 0xB8,
++            F5INDI_SETOTHERMODE_C = 0xB9,
++            F5INDI_SETOTHERMODE = 0xBA,
++            F5INDI_TEXTURE = 0xBB,
++            F5INDI_MOVEWORD = 0xBC,
++            F5INDI_TRI1 = 0xBF,
++            F5INDI_TEXRECT = 0xE4
++        };
++
++        // Matches the first 8 bytes of RSP::Vertex (and GLideN64's SWVertex).
++        struct SWVertex {
++            int16_t y;
++            int16_t x;
++            uint16_t flag;
++            int16_t z;
++        };
++
++        constexpr uint32_t MaxDisplayListDepth = 32;
++
++        struct Context {
++            // 0x100 bytes of slack, the microcode code paths are not bounds-checked in GLideN64 either.
++            alignas(8) std::array<uint8_t, 0x1100> dmem;
++            std::array<uint32_t, MaxDisplayListDepth> nextBlock; // GLideN64: RSP.F5DL
++            uint32_t depth = 0;
++            int32_t mtxStAdjust[16];
++            hlslpp::float4x4 mtxVtxGen;
++            std::vector<SWVertex> vertexScratch;
++        };
++
++        static Context ctx;
++
++#       define F5_DMEM(type, addr) reinterpret_cast<type>(ctx.dmem.data() + (addr))
++#       define F5_RDRAM(type, addr) reinterpret_cast<type>(state->RDRAM + (addr))
++
++        static inline uint32_t shiftR(uint32_t v, uint32_t s, uint32_t w) {
++            return (v >> s) & ((w >= 32) ? 0xFFFFFFFFU : ((1U << w) - 1U));
++        }
++
++        static inline uint32_t shiftL(uint32_t v, uint32_t s, uint32_t w) {
++            return (v & ((w >= 32) ? 0xFFFFFFFFU : ((1U << w) - 1U))) << s;
++        }
++
++        // X*X + Y*Y + Z*Z of 16-bit values. GLideN64 computes this in 32-bit int, where it wraps on overflow;
++        // this keeps the same result without relying on signed overflow.
++        static inline uint64_t squaredLength(int16_t X, int16_t Y, int16_t Z) {
++            const uint32_t sum = uint32_t(int32_t(X) * X) + uint32_t(int32_t(Y) * Y) + uint32_t(int32_t(Z) * Z);
++            return uint64_t(int64_t(int32_t(sum)));
++        }
++
++        static inline const uint32_t *params(DisplayList *dl) {
++            return reinterpret_cast<const uint32_t *>(dl);
++        }
++
++        static Workload &currentWorkload(State *state) {
++            return state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
++        }
++
++        // Display list control flow.
++
++        static void enterList(State *state, DisplayList **dl, uint32_t address) {
++            address &= 0xFFFFFF;
++            // Point at the block header; the interpreter's increment skips it.
++            *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(address));
++            ctx.nextBlock[ctx.depth] = shiftR(*F5_RDRAM(const uint32_t *, address), 0, 24);
++        }
++
++        // Bring-up statistics, printed for the first display lists.
++        static uint32_t traceLists = 0;
++        static uint32_t traceTris = 0;
++        static uint32_t traceRects = 0;
++        static uint32_t traceClipped = 0;
++
++        static void traceListEnd() {
++            if (traceLists > 0 && (traceLists <= 20 || (traceLists % 300) == 0)) {
++                fprintf(stderr, "[f5indi] list %u: %u triangles (%u clipped), %u texrects\n", traceLists, traceTris, traceClipped, traceRects);
++            }
++        }
++
++        static void startDisplayList(State *state, DisplayList **dl) {
++            traceListEnd();
++            traceLists++;
++            traceTris = 0;
++            traceRects = 0;
++            traceClipped = 0;
++            if (traceLists <= 3) {
++                const uint32_t *w = reinterpret_cast<const uint32_t *>(*dl);
++                fprintf(stderr, "[f5indi] list start: %08X %08X %08X %08X %08X %08X\n", w[0], w[1], w[2], w[3], w[4], w[5]);
++            }
++
++            // GLideN64: _ProcessDListFactor5. The root list also starts with a block header.
++            static const uint32_t addrToClear[] = { 0x11C, 0x120, 0x124, 0x37C, 0x58C, 0x5B0, 0x5B4 };
++            for (uint32_t addr : addrToClear) {
++                *F5_DMEM(uint32_t *, addr) = 0;
++            }
++
++            ctx.depth = 0;
++            ctx.nextBlock[0] = (*dl)->w0 & 0xFFFFFF;
++            *dl = *dl + 1;
++        }
++
++        static void runDl(State *state, DisplayList **dl) {
++            if (ctx.depth + 1 >= MaxDisplayListDepth) {
++                assert(false && "F5INDI display list stack overflow.");
++                return;
++            }
++
++            state->pushReturnAddress(*dl);
++            ctx.depth++;
++            enterList(state, dl, (*dl)->w1);
++        }
++
++        static void branchDl(State *state, DisplayList **dl) {
++            enterList(state, dl, (*dl)->w1);
++        }
++
++        static void jumpDl(State *state, DisplayList **dl) {
++            enterList(state, dl, ctx.nextBlock[ctx.depth]);
++        }
++
++        static void endDl(State *state, DisplayList **dl) {
++            if (ctx.depth > 0) {
++                ctx.depth--;
++            }
++
++            *dl = state->popReturnAddress();
++        }
++
++        // Runs the display list whose address the game stored at DMEM 0x58C (GLideN64: F5INDI_DoSubDList).
++        static void doSubDList(State *state) {
++            const uint32_t dlistAddr = shiftR(*F5_DMEM(const uint32_t *, 0x58C), 0, 24);
++            if (dlistAddr == 0) {
++                return;
++            }
++
++            if (ctx.depth + 1 >= MaxDisplayListDepth) {
++                return;
++            }
++
++            ctx.depth++;
++            ctx.nextBlock[ctx.depth] = shiftR(*F5_RDRAM(const uint32_t *, dlistAddr), 0, 24);
++            DisplayList *cursor = reinterpret_cast<DisplayList *>(state->fromRDRAM(dlistAddr)) + 1;
++            const GBI *gbi = state->ext.interpreter->hleGBI;
++            for (uint32_t guard = 0; guard < 0x10000; guard++) {
++                if ((cursor->w0 == 0xB8000000) && (cursor->w1 == 0xFFFFFFFF)) {
++                    break;
++                }
++
++                const uint8_t opCode = cursor->w0 >> 24;
++                if (displayListDumpFile != nullptr) {
++                    fprintf(displayListDumpFile, "  sub %08X %08X\n", cursor->w0, cursor->w1);
++                }
++                GBIFunction func = gbi->map[opCode];
++                if (func != nullptr) {
++                    func(state, &cursor);
++                }
++
++                if (cursor == nullptr) {
++                    break;
++                }
++
++                cursor++;
++            }
++
++            ctx.depth--;
++            *F5_DMEM(uint32_t *, 0x58C) = 0;
++        }
++
++        // DMA into DMEM.
++
++        static void dmaDirect(State *state, uint32_t w0, uint32_t w1) {
++            const uint32_t *src = F5_RDRAM(const uint32_t *, shiftR(w1, 0, 24));
++            uint32_t *dst = F5_DMEM(uint32_t *, shiftR(w0, 8, 12));
++            const uint32_t count = (shiftR(w0, 0, 8) + 1) >> 2;
++            for (uint32_t i = 0; i < count; i++) {
++                dst[i] = src[i];
++            }
++        }
++
++        // Streams data that follows in the display list blocks (set up by SET_DLIST_ADDR).
++        static void dmaSegmented(State *state, uint32_t w0, uint32_t w1) {
++            if (shiftR(w0, 0, 8) == 0) {
++                return;
++            }
++
++            uint32_t *FD4 = F5_DMEM(uint32_t *, 0xFD4);
++            uint32_t *FD8 = F5_DMEM(uint32_t *, 0xFD8);
++            uint32_t *FDC = F5_DMEM(uint32_t *, 0xFDC);
++            int32_t A0 = shiftR(w0, 0, 8);
++            uint32_t A2 = *FDC;
++            int32_t A3 = A0 + 1;
++            int32_t A1 = int32_t(A2) - A3;
++            uint32_t V1 = shiftR(w0, 8, 12);
++            while (A1 < 0) {
++                const uint32_t V0 = *FD4;
++                A3 = A0 - int32_t(A2);
++                memcpy(ctx.dmem.data() + V1, state->RDRAM + shiftR(V0, 0, 24), A2);
++
++                V1 += A2;
++                A0 = A3;
++                w1 = *FD8;
++
++                const uint32_t *src = F5_RDRAM(const uint32_t *, shiftR(w1, 0, 24));
++                *FD8 = *src;
++                *FDC = 0x100;
++                *FD4 = w1 + 0x08;
++
++                A2 = *FDC;
++                A3 = A0 + 1;
++                A1 = int32_t(A2) - A3;
++            }
++
++            const uint32_t V0 = *FD4;
++            const uint32_t T0 = V0 + A3;
++            memcpy(ctx.dmem.data() + V1, state->RDRAM + shiftR(V0, 0, 24), A0 + 1);
++            *FDC = A1;
++            *FD4 = T0;
++        }
++
++        static void setDListAddr(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            const uint32_t count = w0 & 0x1FF;
++            const uint32_t *src = F5_RDRAM(const uint32_t *, shiftR(w1, 0, 24));
++            uint32_t *dst = F5_DMEM(uint32_t *, 0xFD4);
++            dst[0] = w1 + 8;
++            dst[1] = *src;
++            dst[2] = count;
++        }
++
++        // Matrices.
++
++        static void loadSTMatrix() {
++            const uint16_t *mtxI = F5_DMEM(const uint16_t *, 0xE40);
++            const uint16_t *mtxF = F5_DMEM(const uint16_t *, 0xE60);
++            for (uint32_t i = 0; i < 16; i++) {
++                ctx.mtxStAdjust[i] = (int32_t(mtxI[i ^ 1]) << 16) | mtxF[i ^ 1];
++            }
++        }
++
++        // GLideN64 negates y after transforming the vertices of this microcode (gSPLoadSWVertexData). Doing it in the
++        // matrix keeps the picture upright and the triangle winding (and with it culling) as on the hardware.
++        static void flipY(hlslpp::float4x4 &m) {
++            static const bool noFlip = getenv("INDY64_NOFLIP") != nullptr;
++            if (noFlip) {
++                return;
++            }
++
++            for (int r = 0; r < 4; r++) {
++                m[r][1] = -float(m[r][1]);
++            }
++        }
++
++        static void loadVtxGenMatrix(State *state, uint32_t address) {
++            const FixedMatrix *fixedMatrix = reinterpret_cast<const FixedMatrix *>(state->fromRDRAM(address & 0xFFFFF8));
++            ctx.mtxVtxGen = fixedMatrix->toMatrix4x4();
++            flipY(ctx.mtxVtxGen);
++        }
++
++        // Vertices.
++
++        // Loads positions into vertex slots [first, first + count). Color and texture coordinates are set per triangle.
++        static void loadVertices(State *state, const SWVertex *src, uint32_t first, uint32_t count) {
++            if ((count == 0) || ((first + count) > RSP_MAX_VERTICES)) {
++                return;
++            }
++
++            RSP::Vertex vertices[RSP_MAX_VERTICES] = {};
++            for (uint32_t i = 0; i < count; i++) {
++                memcpy(&vertices[i], &src[i], sizeof(SWVertex));
++                vertices[i].color.r = vertices[i].color.g = vertices[i].color.b = vertices[i].color.a = 0xFF;
++            }
++
++            state->rsp->setVertexHost(vertices, count, first);
++        }
++
++        // Loads only the vertices whose bit is set (GLideN64: gSPSWVertex with verticesToProcess).
++        static void loadVerticesMasked(State *state, const SWVertex *src, const bool *process, uint32_t count) {
++            uint32_t runStart = 0;
++            bool inRun = false;
++            for (uint32_t i = 0; i <= count; i++) {
++                const bool take = (i < count) && process[i];
++                if (take && !inRun) {
++                    runStart = i;
++                    inRun = true;
++                }
++                else if (!take && inRun) {
++                    loadVertices(state, src + runStart, runStart, i - runStart);
++                    inRun = false;
++                }
++            }
++        }
++
++        // Vertex indices are halfwords at DMEM, positions are 6-byte records in RDRAM, offset by DMEM 0x128.
++        static const SWVertex *loadVtxIndexed(State *state, uint32_t w0, uint32_t w1) {
++            const uint32_t count = shiftR(w1, 24, 8);
++            const uint32_t dmemAddr = shiftR(w0, 8, 12);
++            const uint16_t *dmemData = F5_DMEM(const uint16_t *, dmemAddr);
++            const uint32_t baseAddr = *F5_DMEM(const uint32_t *, 0x154);
++            ctx.vertexScratch.resize(count);
++            uint32_t *res = reinterpret_cast<uint32_t *>(ctx.vertexScratch.data());
++            const uint16_t *v0Data = F5_DMEM(const uint16_t *, 0x128);
++            const uint16_t X0 = v0Data[0x0 ^ 1];
++            const uint16_t Y0 = v0Data[0x1 ^ 1];
++            const uint16_t Z0 = v0Data[0x2 ^ 1];
++            for (uint32_t i = 0; i < count; i++) {
++                const uint32_t rdramAddr = dmemData[i ^ 1] * 6 + baseAddr;
++                const uint16_t *rdramData = F5_RDRAM(const uint16_t *, rdramAddr & 0x00FFFFF8);
++                const uint32_t shift = (rdramAddr & 7) >> 1;
++                const uint16_t X = rdramData[(shift + 0) ^ 1] + X0;
++                const uint16_t Y = rdramData[(shift + 1) ^ 1] + Y0;
++                const uint16_t Z = rdramData[(shift + 2) ^ 1] + Z0;
++                *res++ = (uint32_t(X) << 16) | Y;
++                *res++ = uint32_t(Z) << 16;
++            }
++
++            return ctx.vertexScratch.data();
++        }
++
++        // Positions in DMEM, offset by DMEM 0x128 when that is non-zero.
++        static const SWVertex *adjustVtx(State *state, uint32_t w0, uint32_t w1) {
++            const uint32_t dmemAddr = shiftR(w0, 8, 12);
++            if (*F5_DMEM(const uint64_t *, 0x128) == 0) {
++                return F5_DMEM(const SWVertex *, dmemAddr);
++            }
++
++            const uint16_t *v0Data = F5_DMEM(const uint16_t *, 0x128);
++            const uint16_t X0 = v0Data[0x0 ^ 1];
++            const uint16_t Y0 = v0Data[0x1 ^ 1];
++            const uint16_t Z0 = v0Data[0x2 ^ 1];
++            const uint32_t count = shiftR(w1, 24, 7);
++            ctx.vertexScratch.resize(count);
++            uint32_t *res = reinterpret_cast<uint32_t *>(ctx.vertexScratch.data());
++            const uint16_t *dmemData = F5_DMEM(const uint16_t *, dmemAddr);
++            for (uint32_t i = 0; i < count; i++) {
++                const uint16_t X = dmemData[0x0 ^ 1] + X0;
++                const uint16_t Y = dmemData[0x1 ^ 1] + Y0;
++                const uint16_t Z = dmemData[0x2 ^ 1] + Z0;
++                *res++ = (uint32_t(X) << 16) | Y;
++                *res++ = uint32_t(Z) << 16;
++                dmemData += 4;
++            }
++
++            return ctx.vertexScratch.data();
++        }
++
++        // Lighting: computes the per-vertex colors at DMEM 0xD40 that the triangle commands pick from.
++
++        static void lightingOverlay1(uint32_t w0, uint32_t w1) {
++            const uint32_t S = ((shiftR(w1, 24, 7) << 2) + 4) & 0xFFF8;
++            memset(ctx.dmem.data() + 0xD40, 0, S);
++
++            uint8_t L = ctx.dmem[0x58B ^ 3];
++            if (L == 0) {
++                *F5_DMEM(uint64_t *, 0x05B0) = 0U;
++                return;
++            }
++
++            uint32_t lightAddr = 0xB10;
++            const uint32_t dataAddr = shiftR(w0, 8, 12);
++            while (true) {
++                uint8_t *dst = ctx.dmem.data() + 0xD40;
++                const uint8_t *data = ctx.dmem.data() + dataAddr;
++                const uint8_t *light = ctx.dmem.data() + lightAddr;
++                if (*light == 0) {
++                    const uint32_t count = S >> 3;
++                    for (uint32_t i = 0; i < count; i++) {
++                        const uint8_t *factor = ctx.dmem.data() + 0x158;
++                        dst[0] = (data[0] * factor[0]) >> 8;
++                        for (uint32_t j = 1; j < 4; j++) {
++                            dst[j] = std::min(((data[j] * factor[j] * light[j]) >> 16) + dst[j], 0xFF);
++                        }
++
++                        factor += 4;
++                        dst += 4;
++                        data += 4;
++                        dst[0] = (data[0] * factor[0]) >> 8;
++                        for (uint32_t j = 1; j < 4; j++) {
++                            dst[j] = std::min(((data[j] * factor[j] * light[j]) >> 16) + dst[j], 0xFF);
++                        }
++
++                        dst += 4;
++                        data += 4;
++                    }
++                }
++                else {
++                    const uint8_t *offsetAddr = ctx.dmem.data() + 0x380;
++                    uint32_t offsetAddrIdx = 0;
++                    uint64_t vtxAddrPos = *F5_DMEM(const uint64_t *, 0x05B0);
++                    const uint32_t factors[2] = { *F5_DMEM(const uint32_t *, 0x158), *F5_DMEM(const uint32_t *, 0x15C) };
++                    const uint32_t count = S >> 3;
++                    for (uint32_t i = 0; i < count; i++) {
++                        uint32_t vtxAddr[2];
++                        switch (vtxAddrPos & 3) {
++                        case 0:
++                            vtxAddr[0] = vtxAddr[1] = lightAddr - 0x10;
++                            break;
++                        case 1:
++                            vtxAddr[0] = lightAddr - 0x08;
++                            vtxAddr[1] = lightAddr - 0x10;
++                            break;
++                        case 2:
++                            vtxAddr[0] = lightAddr - 0x10;
++                            vtxAddr[1] = lightAddr - 0x08;
++                            break;
++                        default:
++                            vtxAddr[0] = vtxAddr[1] = lightAddr - 0x08;
++                            break;
++                        }
++
++                        vtxAddrPos >>= 2;
++                        for (uint32_t j = 0; j < 2; j++) {
++                            const uint32_t *V = F5_DMEM(const uint32_t *, vtxAddr[j]);
++                            const int16_t X1 = int16_t(shiftR(*V, 16, 16));
++                            const int16_t Y1 = int16_t(shiftR(*V, 0, 16));
++                            V++;
++                            const int16_t Z1 = int16_t(shiftR(*V, 16, 16));
++
++                            const uint32_t addr = 0x170 + offsetAddr[offsetAddrIdx ^ 3];
++                            V = F5_DMEM(const uint32_t *, addr & 0x0FFC);
++                            offsetAddrIdx++;
++                            int16_t X = int16_t(shiftR(*V, 16, 16));
++                            int16_t Y = int16_t(shiftR(*V, 0, 16));
++                            V++;
++                            int16_t Z = int16_t(shiftR(*V, 16, 16));
++                            X -= X1;
++                            Y -= Y1;
++                            Z -= Z1;
++
++                            uint64_t T = *F5_DMEM(const uint32_t *, lightAddr + 4);
++                            T = 0xFFFF000000000000ULL | (T << 16);
++                            const uint64_t K = squaredLength(X, Y, Z) * T;
++                            const uint32_t P = uint32_t(K >> 32);
++                            uint32_t P1 = 0;
++                            if ((P & 0xFFFF0000) == 0xFFFF0000) {
++                                P1 = P & 0xFFFF;
++                            }
++
++                            V = F5_DMEM(const uint32_t *, lightAddr);
++                            uint32_t D = (shiftR(*V, 24, 8) * P1) >> 16;
++                            uint32_t E = (shiftR(*V, 16, 8) * P1) >> 16;
++                            uint32_t F = (shiftR(*V, 8, 8) * P1) >> 16;
++                            const uint32_t J = (shiftR(factors[j], 0, 8) * data[0x3 ^ 3]) >> 8;
++                            if (*light == 4) {
++                                *dst++ = uint8_t(J);
++                                *dst = uint8_t(std::min(*dst + F, 0xFFU));
++                                dst++;
++                                *dst = uint8_t(std::min(*dst + E, 0xFFU));
++                                dst++;
++                                *dst = uint8_t(std::min(*dst + D, 0xFFU));
++                                dst++;
++                            }
++                            else {
++                                D += (shiftR(factors[j], 24, 8) * data[0x0 ^ 3]) >> 8;
++                                E += (shiftR(factors[j], 16, 8) * data[0x1 ^ 3]) >> 8;
++                                F += (shiftR(factors[j], 8, 8) * data[0x2 ^ 3]) >> 8;
++                                *dst++ = uint8_t(J);
++                                *dst++ = uint8_t(std::min(F >> 1, 0xFFU));
++                                *dst++ = uint8_t(std::min(E >> 1, 0xFFU));
++                                *dst++ = uint8_t(std::min(D >> 1, 0xFFU));
++                            }
++
++                            data += 4;
++                        }
++                    }
++                }
++
++                --L;
++                if (L == 0) {
++                    *F5_DMEM(uint64_t *, 0x05B0) = 0U;
++                    const uint32_t A = *F5_DMEM(const uint32_t *, 0x5A8);
++                    if (A == 0xFFFFFFFF) {
++                        return;
++                    }
++
++                    uint8_t *dst2 = ctx.dmem.data() + 0xD40;
++                    const uint8_t *factor = ctx.dmem.data() + 0x5A8;
++                    const uint32_t count = S >> 2;
++                    for (uint32_t i = 0; i < count; i++) {
++                        for (uint32_t j = 0; j < 4; j++) {
++                            dst2[j] = (dst2[j] * factor[j]) >> 8;
++                        }
++
++                        dst2 += 4;
++                    }
++
++                    return;
++                }
++
++                lightAddr += 0x18;
++            }
++        }
++
++        static void lightingOverlay2(uint32_t w0, uint32_t w1) {
++            const uint32_t S = ((shiftR(w1, 24, 7) << 2) + 4) & 0xFFF8;
++            memset(ctx.dmem.data() + 0xD40, 0, S + 8);
++
++            uint8_t L = ctx.dmem[0x58B ^ 3];
++            if (L == 0) {
++                *F5_DMEM(uint64_t *, 0x05B0) = 0U;
++                return;
++            }
++
++            uint32_t lightAddr = 0xB10;
++            const uint32_t dataAddr = shiftR(w0, 8, 12);
++            while (true) {
++                uint8_t *dst = ctx.dmem.data() + 0xD40;
++                const uint8_t *data = ctx.dmem.data() + dataAddr;
++                const uint8_t *light = ctx.dmem.data() + lightAddr;
++                if (*light == 0) {
++                    const uint32_t count = S >> 3;
++                    for (uint32_t i = 0; i < count; i++) {
++                        const uint8_t *factor = ctx.dmem.data() + 0x158;
++                        dst[0] = (data[0] * factor[0]) >> 8;
++                        for (uint32_t j = 1; j < 4; j++) {
++                            dst[j] = std::min(((data[j] * factor[j] * light[j]) >> 16) + dst[j], 0xFF);
++                        }
++
++                        factor += 4;
++                        dst += 4;
++                        data += 4;
++                        dst[0] = (data[0] * factor[0]) >> 8;
++                        for (uint32_t j = 1; j < 4; j++) {
++                            dst[j] = std::min(((data[j] * factor[j] * light[j]) >> 16) + dst[j], 0xFF);
++                        }
++
++                        dst += 4;
++                        data += 4;
++                    }
++                }
++                else if (*light == 1) {
++                    uint32_t factor2Addr = 0x380;
++                    uint64_t vtxAddrPos = *F5_DMEM(const uint64_t *, 0x05B0);
++                    const uint32_t factors[2] = { *F5_DMEM(const uint32_t *, 0x158), *F5_DMEM(const uint32_t *, 0x15C) };
++                    const uint32_t count = S >> 3;
++                    for (uint32_t i = 0; i < count; i++) {
++                        uint32_t vtxAddr[2];
++                        switch (vtxAddrPos & 3) {
++                        case 0:
++                            vtxAddr[0] = vtxAddr[1] = lightAddr - 0x10;
++                            break;
++                        case 1:
++                            vtxAddr[0] = lightAddr - 0x08;
++                            vtxAddr[1] = lightAddr - 0x10;
++                            break;
++                        case 2:
++                            vtxAddr[0] = lightAddr - 0x10;
++                            vtxAddr[1] = lightAddr - 0x08;
++                            break;
++                        default:
++                            vtxAddr[0] = vtxAddr[1] = lightAddr - 0x08;
++                            break;
++                        }
++
++                        vtxAddrPos >>= 2;
++                        for (uint32_t j = 0; j < 2; j++) {
++                            uint32_t V = *F5_DMEM(const uint32_t *, vtxAddr[j]);
++                            const int16_t X = int16_t(shiftR(V, 16, 16));
++                            const int16_t Y = int16_t(shiftR(V, 0, 16));
++                            V = *F5_DMEM(const uint32_t *, vtxAddr[j] + 0x04);
++                            const int16_t Z = int16_t(shiftR(V, 16, 16));
++
++                            V = *F5_DMEM(const uint32_t *, factor2Addr);
++                            uint32_t I = uint32_t(((X * int8_t(shiftR(V, 24, 8)) + Y * int8_t(shiftR(V, 16, 8)) + Z * int8_t(shiftR(V, 8, 8))) >> 8) & 0xFFFF);
++                            if ((I & 0x8000) != 0) {
++                                I = 0;
++                            }
++
++                            V = *F5_DMEM(const uint32_t *, lightAddr);
++                            const uint32_t D = (shiftR(V, 24, 8) * I) >> 8;
++                            const uint32_t E = (shiftR(V, 16, 8) * I) >> 8;
++                            const uint32_t F = (shiftR(V, 8, 8) * I) >> 8;
++                            V = factors[j];
++                            const uint32_t K = shiftR(V, 0, 8) * (*data++);
++                            const uint32_t J = shiftR(V, 8, 8) * (*data++);
++                            const uint32_t H = shiftR(V, 16, 8) * (*data++);
++                            const uint32_t G = shiftR(V, 24, 8) * (*data++);
++                            *dst++ = uint8_t(K >> 8);
++                            *dst = uint8_t(std::min(*dst + ((F * J) >> 22), 0xFFU));
++                            dst++;
++                            *dst = uint8_t(std::min(*dst + ((E * H) >> 22), 0xFFU));
++                            dst++;
++                            *dst = uint8_t(std::min(*dst + ((D * G) >> 22), 0xFFU));
++                            dst++;
++                            factor2Addr += 4;
++                        }
++                    }
++                }
++                else {
++                    uint32_t offsetAddr = 0x380;
++                    const uint32_t count = S >> 3;
++                    const uint32_t vtxAddr[2] = { lightAddr - 0x10, lightAddr - 0x10 };
++                    for (uint32_t i = 0; i < count; i++) {
++                        for (uint32_t j = 0; j < 2; j++) {
++                            const uint32_t *V = F5_DMEM(const uint32_t *, vtxAddr[j]);
++                            const int16_t X1 = int16_t(shiftR(*V, 16, 16));
++                            const int16_t Y1 = int16_t(shiftR(*V, 0, 16));
++                            V++;
++                            const int16_t Z1 = int16_t(shiftR(*V, 16, 16));
++
++                            const uint32_t offset = *F5_DMEM(const uint32_t *, offsetAddr + j * 4);
++                            V = F5_DMEM(const uint32_t *, 0x170 + shiftR(offset, 0, 8));
++                            int16_t X = int16_t(shiftR(*V, 16, 16));
++                            int16_t Y = int16_t(shiftR(*V, 0, 16));
++                            V++;
++                            int16_t Z = int16_t(shiftR(*V, 16, 16));
++                            X -= X1;
++                            Y -= Y1;
++                            Z -= Z1;
++
++                            uint64_t T = *F5_DMEM(const uint32_t *, lightAddr + 4);
++                            T = 0xFFFF000000000000ULL | (T << 16);
++                            const uint64_t K = squaredLength(X, Y, Z) * T;
++                            const uint32_t P = uint32_t(K >> 32);
++                            uint32_t P1 = 0;
++                            if ((P & 0xFFFF0000) == 0xFFFF0000) {
++                                P1 = P & 0xFFFF;
++                            }
++
++                            const uint8_t *factor = ctx.dmem.data() + 0x158 + j * 4;
++                            dst[0] = (data[0] * factor[0]) >> 8;
++                            const uint8_t *lightBytes = ctx.dmem.data() + lightAddr;
++                            for (uint32_t k = 1; k < 4; k++) {
++                                dst[k] = uint8_t(std::min(((((lightBytes[k] * P1) >> 16) * data[k] * factor[k] + 0x8000) >> 16) + dst[k], 0xFFU));
++                            }
++
++                            dst += 4;
++                            data += 4;
++                        }
++
++                        offsetAddr += 8;
++                    }
++                }
++
++                --L;
++                if (L == 0) {
++                    *F5_DMEM(uint64_t *, 0x05B0) = 0U;
++                    return;
++                }
++
++                lightAddr += 0x18;
++            }
++        }
++
++        static void lightingBasic(uint32_t w0, uint32_t w1) {
++            int32_t count = shiftR(w1, 24, 7);
++            const uint8_t *factor = ctx.dmem.data() + 0x158;
++            const uint8_t *data = ctx.dmem.data() + shiftR(w0, 8, 12);
++            uint8_t *dst = ctx.dmem.data() + 0xD40;
++            while (count > 0) {
++                for (uint32_t j = 0; j < 8; j++) {
++                    dst[j] = (data[j] * factor[j]) >> 8;
++                }
++
++                dst += 8;
++                data += 8;
++                for (uint32_t j = 0; j < 8; j++) {
++                    dst[j] = (data[j] * factor[j]) >> 8;
++                }
++
++                dst += 8;
++                data += 8;
++                count -= 4;
++            }
++        }
++
++        // Expands RGB565 colors in place to RGBA8888.
++        static void rebuildAndAdjustColors(uint32_t w0, uint32_t w1) {
++            const uint32_t addr = shiftR(w0, 8, 12);
++            const uint32_t count = std::min(shiftR(w1, 24, 8), (0x588 - addr) >> 2);
++            const uint16_t *data = F5_DMEM(const uint16_t *, addr);
++            std::vector<uint32_t> res(count);
++            for (uint32_t i = 0; i < count; i++) {
++                const uint16_t V = data[i ^ 1];
++                const uint32_t R = (V >> 8) & 0xF8;
++                const uint32_t G = (V & 0x7E0) >> 3;
++                const uint32_t B = (V & 0x1F) << 3;
++                res[i] = (R << 24) | (G << 16) | (B << 8) | 0xFF;
++            }
++
++            memcpy(ctx.dmem.data() + addr, res.data(), count << 2);
++        }
++
++        static void moveMem(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            if (shiftR(w1, 0, 24) != 0) {
++                dmaDirect(state, w0, w1);
++            }
++            else {
++                dmaSegmented(state, w0, w1);
++            }
++
++            switch (w0 & 0x00F00000) {
++            case 0x00000000:
++                switch (w0) {
++                case 0x0101300F:
++                    {
++                        static uint32_t last[4] = {};
++                        static uint32_t dumped = 0;
++                        const uint32_t *v = F5_RDRAM(const uint32_t *, shiftR(w1, 0, 24));
++                        if ((memcmp(v, last, sizeof(last)) != 0) && (dumped++ < 40)) {
++                            memcpy(last, v, sizeof(last));
++                            fprintf(stderr, "[f5indi] viewport %08X: %08X %08X %08X %08X | 14C %08X list %u\n", w1, v[0], v[1], v[2], v[3], *F5_DMEM(const uint32_t *, 0x14C), traceLists);
++                        }
++                    }
++                    state->rsp->setViewport(w1);
++                    {
++                        // The RSP clips at the near plane but not at the far plane, a host GPU would drop everything
++                        // beyond it (the sky). Map z/w from [-1, 3] instead of [-1, 1] to the depth range: the near
++                        // plane stays where it is and the depth order is kept.
++                        interop::RSPViewport &viewport = state->rsp->viewportStack[state->rsp->viewportStackSize - 1];
++                        const float nearZ = float(viewport.translate.z) - float(viewport.scale.z);
++                        viewport.scale.z = float(viewport.scale.z) * 0.5f;
++                        viewport.translate.z = nearZ + float(viewport.scale.z);
++                    }
++                    break;
++                case 0x0105C03F:
++                    if (((traceLists % 300) == 0) || (getenv("INDY64_MTX_LIST") && (traceLists == uint32_t(atoi(getenv("INDY64_MTX_LIST")))))) {
++                        static uint32_t dumped = 0;
++                        if (dumped++ < 400) {
++                            const uint32_t *m = F5_RDRAM(const uint32_t *, shiftR(w1, 0, 24));
++                            fprintf(stderr, "[f5indi] force matrix %08X:", w1);
++                            for (uint32_t i = 0; i < 16; i++) {
++                                fprintf(stderr, " %08X", m[i]);
++                            }
++                            const uint32_t *v0 = F5_DMEM(const uint32_t *, 0x128);
++                            fprintf(stderr, " | dmem128 %08X %08X dmem154 %08X\n", v0[0], v0[1], *F5_DMEM(const uint32_t *, 0x154));
++                        }
++                    }
++                    state->rsp->forceMatrix(w1);
++                    flipY(state->rsp->modelViewProjMatrix);
++                    {
++                        // Bring-up aid: INDY64_CAMLOG logs the first matrix of every 30th list (camera tracking).
++                        static const bool camLog = getenv("INDY64_CAMLOG") != nullptr;
++                        static uint32_t lastLoggedList = 0;
++                        if (camLog && ((traceLists % 30) == 0) && (traceLists != lastLoggedList)) {
++                            lastLoggedList = traceLists;
++                            const hlslpp::float4x4 &m = state->rsp->modelViewProjMatrix;
++                            fprintf(stderr, "[cam] list %u", traceLists);
++                            for (int r = 0; r < 4; r++) {
++                                fprintf(stderr, " | %.4f %.4f %.4f %.4f", float(m[r][0]), float(m[r][1]), float(m[r][2]), float(m[r][3]));
++                            }
++                            fprintf(stderr, "\n");
++                        }
++                    }
++                    break;
++                case 0x010E403F:
++                    if (getenv("INDY64_MTX_LIST") && (traceLists == uint32_t(atoi(getenv("INDY64_MTX_LIST"))))) {
++                        const uint32_t *m = F5_RDRAM(const uint32_t *, shiftR(w1, 0, 24));
++                        fprintf(stderr, "[f5indi] vtxgen matrix %08X:", w1);
++                        for (uint32_t i = 0; i < 16; i++) {
++                            fprintf(stderr, " %08X", m[i]);
++                        }
++                        fprintf(stderr, "\n");
++                    }
++                    loadVtxGenMatrix(state, shiftR(w1, 0, 24));
++                    loadSTMatrix();
++                    break;
++                }
++
++                break;
++            case 0x00100000: {
++                const uint32_t n = shiftR(w1, 24, 7);
++                loadVertices(state, adjustVtx(state, w0, w1), 0, n);
++                break;
++            }
++            case 0x00300000:
++                // Number of lights.
++                ctx.dmem[0x058B ^ 3] = uint8_t(w1 >> 24);
++                break;
++            case 0x00500000: {
++                const uint32_t n = shiftR(w1, 24, 7);
++                loadVertices(state, loadVtxIndexed(state, w0, w1), 0, n);
++                break;
++            }
++            default:
++                if (shiftR(w0, 8, 12) == 0x480) {
++                    const uint32_t F = (w0 >> 22);
++                    if ((F & 2) != 0) {
++                        rebuildAndAdjustColors(w0, w1);
++                    }
++
++                    const uint8_t L = ctx.dmem[0x58B ^ 3];
++                    const uint32_t C = shiftR(w1, 24, 8) | L;
++                    if ((C & 0x80) == 0) {
++                        if ((F & 1) != 0) {
++                            lightingOverlay1(w0, w1);
++                        }
++                        else {
++                            lightingOverlay2(w0, w1);
++                        }
++                    }
++                    else {
++                        lightingBasic(w0, w1);
++                    }
++                }
++
++                break;
++            }
++        }
++
++        // Triangles.
++
++        // Environment-mapped texture coordinates from the vertex positions (GLideN64: F5INDI_CalcST).
++        static void calcST(const uint32_t *p, uint32_t *st, uint32_t num) {
++            const int16_t *subs = F5_DMEM(const int16_t *, 0x0F0);
++            const uint16_t *muls = F5_DMEM(const uint16_t *, 0x0EC);
++            const int32_t *mtx = ctx.mtxStAdjust;
++            for (uint32_t i = 0; i < num; i++) {
++                const uint32_t idx = shiftR(p[i + 4], 0, 8);
++                const int16_t *coords = F5_DMEM(const int16_t *, 0x170 + idx);
++                const int16_t X = coords[0x0 ^ 1];
++                const int16_t Y = coords[0x1 ^ 1];
++                const int16_t Z = coords[0x2 ^ 1];
++                int32_t X1 = X * mtx[0 + 4 * 0] + Y * mtx[0 + 4 * 1] + Z * mtx[0 + 4 * 2] + mtx[0 + 4 * 3];
++                int32_t Y1 = X * mtx[1 + 4 * 0] + Y * mtx[1 + 4 * 1] + Z * mtx[1 + 4 * 2] + mtx[1 + 4 * 3];
++                int32_t Z1 = X * mtx[2 + 4 * 0] + Y * mtx[2 + 4 * 1] + Z * mtx[2 + 4 * 2] + mtx[2 + 4 * 3];
++                X1 -= int32_t(uint32_t(uint16_t(subs[0x0 ^ 1])) << 16);
++                Y1 -= int32_t(uint32_t(uint16_t(subs[0x1 ^ 1])) << 16);
++                Z1 -= int32_t(uint32_t(uint16_t(subs[0x2 ^ 1])) << 16);
++                const uint64_t X2 = uint64_t(int64_t(X1));
++                const uint64_t X2_2 = (X2 * X2) >> 16;
++                const uint64_t Y2 = uint64_t(int64_t(Y1));
++                const uint64_t Y2_2 = (Y2 * Y2) >> 16;
++                const uint64_t Z2 = uint64_t(int64_t(Z1));
++                const uint64_t Z2_2 = (Z2 * Z2) >> 16;
++                const uint64_t R = X2_2 + Y2_2 + Z2_2;
++                uint32_t R1 = uint32_t(R);
++                if (R > 0x0000FFFFFFFFULL) {
++                    R1 = 0x7FFF0000 | (R & 0xFFFF);
++                }
++
++                uint32_t D = uint32_t(sqrt(double(R1)));
++                D = (D == 0) ? 0xFFFFFFFF : (0xFFFFFFFF / (D * 0x300));
++                const uint32_t V = uint32_t((D * X2) >> 16);
++                const uint32_t W = uint32_t((D * Y2) >> 16);
++                const uint32_t S = (V * muls[0x0 ^ 1]) >> 16;
++                const uint32_t T = (W * muls[0x1 ^ 1]) >> 16;
++                st[i] = (S << 16) | (T & 0xFFFF);
++            }
++        }
++
++        // Same rule as GLideN64's isClipped: the triangle is dropped if all corners are outside the same plane.
++        static uint32_t clipFlags(const hlslpp::float4 &p) {
++            const float x = p.x, y = p.y, w = p.w;
++            uint32_t flags = 0;
++            flags |= (x < -w) ? 0x1 : 0;
++            flags |= (x > w) ? 0x2 : 0;
++            flags |= (y < -w) ? 0x4 : 0;
++            flags |= (y > w) ? 0x8 : 0;
++            flags |= (w < 0.01f) ? 0x10 : 0;
++            return flags;
++        }
++
++        static uint32_t vertexClipFlags(State *state, uint32_t slot) {
++            const Workload &workload = currentWorkload(state);
++            return clipFlags(workload.drawData.posTransformed[state->rsp->indices[slot]]);
++        }
++
++        static void tri(State *state, DisplayList **dl) {
++            RSP &rsp = *state->rsp;
++            const uint32_t *p = params(*dl);
++            const uint32_t w0 = p[0];
++            const uint32_t w1 = p[1];
++            const bool tri2 = (w0 >> 24) == F5INDI_TRI2;
++            const uint32_t w2 = p[2];
++            const uint32_t w3 = p[3];
++            const uint32_t vert[4] = {
++                (shiftR(w1, 16, 12) - 0x600) / 40,
++                (shiftR(w1, 0, 12) - 0x600) / 40,
++                (shiftR(w3, 16, 12) - 0x600) / 40,
++                (shiftR(w3, 0, 12) - 0x600) / 40
++            };
++
++            const uint32_t colorOffsets[4] = { shiftR(w2, 16, 8), shiftR(w2, 8, 8), shiftR(w2, 0, 8), shiftR(w2, 24, 8) };
++            const bool useTex = (w0 & 0x0200) != 0;
++            uint32_t computedST[4];
++            const uint32_t *texBase = p + 4;
++            const uint32_t count = tri2 ? 4 : 3;
++            if ((w0 & 0x0800) != 0) {
++                calcST(p, computedST, count);
++                texBase = computedST;
++            }
++
++            for (uint32_t i = 0; i < count; i++) {
++                if (vert[i] >= RSP_MAX_VERTICES) {
++                    assert(false && "F5INDI triangle uses an invalid vertex slot.");
++                    return;
++                }
++            }
++
++            // GLideN64 buffers the triangles and runs the material sub display list right after the first visible one,
++            // so the material already applies to it. RT64 draws immediately, so the sub list has to run first.
++            auto isVisible = [&](uint32_t a, uint32_t b, uint32_t c) {
++                return (vertexClipFlags(state, a) & vertexClipFlags(state, b) & vertexClipFlags(state, c)) == 0;
++            };
++
++            if (isVisible(vert[0], vert[1], vert[2]) || (tri2 && isVisible(vert[0], vert[2], vert[3]))) {
++                doSubDList(state);
++            }
++
++            // Bring-up aid: INDY64_FLAT draws all triangles with the shade color only (combiner 0,0,0,SHADE / 1).
++            static const bool flat = getenv("INDY64_FLAT") != nullptr;
++            if (flat) {
++                state->rdp->setCombine((uint64_t(0xFFFFFF) << 32) | 0xFFFE7D3EULL);
++            }
++
++            // Colors and texture coordinates belong to the triangle corner, not to the vertex.
++            const bool persp = state->rdp->otherMode.textPersp() != 0;
++            static const bool whiteShade = getenv("INDY64_WHITE_SHADE") != nullptr;
++            for (uint32_t i = 0; i < count; i++) {
++                rsp.modifyVertex(uint16_t(vert[i]), G_MWO_POINT_RGBA, whiteShade ? 0xFFFFFFFFU : *F5_DMEM(const uint32_t *, 0xD40 + colorOffsets[i]));
++
++                // modifyVertex turns fog off for the vertex (F3DEX2 MODIFYVTX semantics). Here only the color comes
++                // from the triangle; as in GLideN64 the fog factor still comes from the depth when G_FOG is set.
++                // Without this the corner alpha (usually 0xFF) became the fog factor: whole levels in fog color.
++                {
++                    Workload &workload = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
++                    workload.drawData.fogIndices[rsp.indices[vert[i]]] = rsp.curFogIndex;
++                }
++                if (useTex) {
++                    uint32_t st = texBase[i];
++                    if (!persp) {
++                        // s11.4 without perspective correction, modifyVertex expects s10.5.
++                        const int32_t s = int32_t(int16_t(st >> 16)) * 2;
++                        const int32_t t = int32_t(int16_t(st & 0xFFFF)) * 2;
++                        st = (uint32_t(uint16_t(std::clamp(s, -32768, 32767))) << 16) | uint16_t(std::clamp(t, -32768, 32767));
++                    }
++
++                    rsp.modifyVertex(uint16_t(vert[i]), G_MWO_POINT_ST, st);
++                }
++            }
++
++            auto drawTri = [&](uint32_t a, uint32_t b, uint32_t c) {
++                // Indy64 bug reports: every triangle of the dumped list with its corners in clip space (x y z w),
++                // whether it is dropped and the scissor it is drawn with.
++                if (displayListDumpFile != nullptr) {
++                    const Workload &workload = currentWorkload(state);
++                    const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
++                    fprintf(displayListDumpFile, "  tri %s tex %d scissor %d %d %d %d geom %08X:", isVisible(a, b, c) ? "drawn" : "DROPPED", int(useTex),
++                        sc.ulx / 4, sc.uly / 4, sc.lrx / 4, sc.lry / 4, rsp.geometryModeStack[rsp.geometryModeStackSize - 1]);
++                    for (uint32_t slot : { a, b, c }) {
++                        const auto &tf = workload.drawData.posTransformed[rsp.indices[slot]];
++                        fprintf(displayListDumpFile, " [%.1f %.1f %.1f %.1f]", float(tf.x), float(tf.y), float(tf.z), float(tf.w));
++                    }
++                    fprintf(displayListDumpFile, "\n");
++                }
++
++                if (!isVisible(a, b, c)) {
++                    static uint32_t clippedPrints = 0;
++                    if ((traceClipped == 0) && ((traceLists % 300) == 0) && (clippedPrints++ < 24)) {
++                        const Workload &workload = currentWorkload(state);
++                        const auto &mvp = rsp.modelViewProjMatrix;
++                        fprintf(stderr, "[f5indi] clipped tri, mvp rows:\n");
++                        for (int r = 0; r < 4; r++) {
++                            fprintf(stderr, "    %g %g %g %g\n", float(mvp[r][0]), float(mvp[r][1]), float(mvp[r][2]), float(mvp[r][3]));
++                        }
++                        for (uint32_t slot : { a, b, c }) {
++                            const uint32_t g = rsp.indices[slot];
++                            const auto &tf = workload.drawData.posTransformed[g];
++                            fprintf(stderr, "    v%u pos %g %g %g -> %g %g %g %g\n", slot, workload.drawData.posFloats[g * 3 + 0],
++                                workload.drawData.posFloats[g * 3 + 1], workload.drawData.posFloats[g * 3 + 2],
++                                float(tf.x), float(tf.y), float(tf.z), float(tf.w));
++                        }
++                    }
++                    traceClipped++;
++                    return;
++                }
++
++                // Untextured polygons are never culled; textured ones never cull front faces only.
++                uint32_t &geometryMode = rsp.geometryModeStack[rsp.geometryModeStackSize - 1];
++                const uint32_t savedMode = geometryMode;
++                if (useTex) {
++                    if ((geometryMode & rsp.cullBothMask) == rsp.cullBothMask) {
++                        geometryMode &= ~rsp.cullFrontMask;
++                    }
++                }
++                else {
++                    geometryMode &= ~rsp.cullBothMask;
++                }                if (geometryMode != savedMode) {
++                    state->updateDrawStatusAttribute(DrawAttribute::GeometryMode);
++                }
++
++                // Bring-up aid: triangles with a corner behind the camera (w <= 0) or far outside the screen.
++                {
++                    static uint32_t oddPrints = 0;
++                    const Workload &workload = currentWorkload(state);
++                    bool odd = false;
++                    float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
++                    for (uint32_t slot : { a, b, c }) {
++                        const auto &tf = workload.drawData.posTransformed[rsp.indices[slot]];
++                        odd |= (float(tf.w) <= 0.0f) || (std::abs(float(tf.x)) > 8.0f * std::abs(float(tf.w))) || (std::abs(float(tf.y)) > 8.0f * std::abs(float(tf.w)));
++                        if (float(tf.w) > 0.0f) {
++                            const float nx = float(tf.x) / float(tf.w), ny = float(tf.y) / float(tf.w);
++                            minX = std::min(minX, nx); maxX = std::max(maxX, nx);
++                            minY = std::min(minY, ny); maxY = std::max(maxY, ny);
++                        }
++                    }
++                    // Also report triangles covering more than half the screen in either direction.
++                    odd |= ((maxX - minX) > 1.0f) || ((maxY - minY) > 1.0f);
++                    static const uint32_t oddFrom = getenv("INDY64_ODD_FROM") ? uint32_t(atoi(getenv("INDY64_ODD_FROM"))) : 0;
++                    if (odd && (traceLists == oddFrom) && (oddPrints++ < 400)) {
++                        fprintf(stderr, "[f5indi] odd tri list %u at %08X op %02X w0 %08X w1 %08X:", traceLists, uint32_t(reinterpret_cast<const uint8_t *>(*dl) - state->RDRAM), w0 >> 24, w0, w1);
++                        for (uint32_t slot : { a, b, c }) {
++                            const uint32_t g = rsp.indices[slot];
++                            const auto &tf = workload.drawData.posTransformed[g];
++                            fprintf(stderr, " [slot %u pos %g %g %g -> %g %g %g w %g]", slot, workload.drawData.posFloats[g * 3 + 0],
++                                workload.drawData.posFloats[g * 3 + 1], workload.drawData.posFloats[g * 3 + 2], float(tf.x), float(tf.y), float(tf.z), float(tf.w));
++                        }
++                        fprintf(stderr, "\n");
++                    }
++                }
++
++                static uint32_t drawnPrints = 0;
++                if (((traceLists % 300) == 0) && (traceTris < 400) && ((traceTris % 40) == 0) && (drawnPrints++ < 200)) {
++                    const Workload &workload = currentWorkload(state);
++                    fprintf(stderr, "[f5indi] drawn tri list %u #%u geom %08X othermode %08X %08X tex %d:", traceLists, traceTris,
++                        geometryMode, state->rdp->otherMode.H, state->rdp->otherMode.L, int(useTex));
++                    for (uint32_t slot : { a, b, c }) {
++                        const auto &tf = workload.drawData.posTransformed[rsp.indices[slot]];
++                        const auto &ps = workload.drawData.posScreen[rsp.indices[slot]];
++                        fprintf(stderr, " (%.0f %.0f %.3f w%.0f | scr %.1f %.1f %.3f | proj %u)", float(tf.x / tf.w * 100.0f), float(tf.y / tf.w * 100.0f), float(tf.z / tf.w), float(tf.w),
++                            float(ps.x), float(ps.y), float(ps.z), uint32_t(workload.drawData.viewProjIndices[rsp.indices[slot]]));
++                    }
++                    fprintf(stderr, " scissor %d %d %d %d", int(state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1].ulx), int(state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1].uly),
++                        int(state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1].lrx), int(state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1].lry));
++                    fprintf(stderr, "\n");
++                }
++                rsp.drawIndexedTri(a, b, c);
++                if (geometryMode != savedMode) {
++                    geometryMode = savedMode;
++                    state->updateDrawStatusAttribute(DrawAttribute::GeometryMode);
++                }
++            };
++
++            traceTris += tri2 ? 2 : 1;
++            drawTri(vert[0], vert[1], vert[2]);
++            if (tri2) {
++                drawTri(vert[0], vert[2], vert[3]);
++            }
++
++            // 16 bytes without texture coordinates, 32 with.
++            *dl = *dl + (useTex ? 3 : 1);
++        }
++
++        // Geometry generators (command 0x05).
++
++        static void genVertices(State *state, uint32_t w0, uint32_t w1) {
++            RSP &rsp = *state->rsp;
++            const SWVertex *vertex = F5_DMEM(const SWVertex *, 0x170);
++            bool process[32] = {};
++            uint32_t A = (w0 & 0x0000FFFF) | (w1 & 0xFFFF0000);
++            uint32_t B = 1;
++            uint32_t count = 0;
++            while ((A != 0) && (count < 32)) {
++                const uint32_t C = A & B;
++                process[count++] = (C != 0);
++                if (C != 0) {
++                    A ^= C;
++                }
++
++                B <<= 1;
++            }
++
++            // These vertices use their own matrix instead of the current one.
++            const hlslpp::float4x4 savedMatrix = rsp.modelViewProjMatrix;
++            rsp.modelViewProjMatrix = ctx.mtxVtxGen;
++            rsp.modelViewProjInserted = true;
++            rsp.modelViewProjChanged = false;
++            loadVerticesMasked(state, vertex, process, count);
++            rsp.modelViewProjMatrix = savedMatrix;
++            rsp.modelViewProjInserted = true;
++            rsp.modelViewProjChanged = false;
++        }
++
++        // Particle system: animates particle positions in DMEM and writes them back to RDRAM.
++        static void genParticlesVertices(State *state, const uint32_t *p) {
++            static const uint32_t dpcClock0 = uint32_t(time(nullptr));
++            *F5_DMEM(uint64_t *, 0xC10) = *F5_RDRAM(const uint64_t *, shiftR(p[3], 0, 24));
++            const uint32_t L = *F5_DMEM(const uint32_t *, 0xC10);
++            if (L == 0) {
++                return;
++            }
++
++            uint32_t U = L;
++            memcpy(ctx.dmem.data() + 0x170, state->RDRAM + shiftR(p[2], 0, 24), 256);
++            const uint32_t corrector = shiftR(p[0], 0, 16);
++            const uint32_t M = shiftR(p[5], 0, 16);
++            uint32_t vtxAddr = 0x170;
++            uint32_t lightAddr = 0xB00;
++            uint32_t factorAddr = 0x380;
++            uint32_t colorAddr = 0x480;
++            uint32_t count = 0;
++            uint32_t Q = 0;
++            while ((U != 0) && (count < 32)) {
++                SWVertex *vertex = F5_DMEM(SWVertex *, vtxAddr);
++                uint16_t *light = F5_DMEM(uint16_t *, lightAddr);
++                uint16_t F = uint16_t((((uint32_t(light[0x0 ^ 1]) << 12) + light[0x1 ^ 1] * corrector) << 4) >> 16);
++                bool endCycle = false;
++                if ((M & 0x2000) == 0) {
++                    int16_t F1;
++                    do {
++                        F = uint16_t((((uint32_t(light[0x0 ^ 1]) << 12) + light[0x1 ^ 1] * corrector) << 4) >> 16);
++                        F1 = int16_t(F + 0xF000);
++                        if (F1 < 0) {
++                            light[0x0 ^ 1] = F;
++                            if ((M & 0x40) != 0) {
++                                vertex->flag = uint16_t((((F >> 4) & 0xFC) << 8) | (vertex->flag & 0xFF));
++                            }
++
++                            if ((M & 0x20) != 0) {
++                                vertex->flag = uint16_t(((F >> 4) & 0xFC) | (vertex->flag & 0xFF00));
++                            }
++                        }
++                        else {
++                            light[0x0 ^ 1] = 0U;
++                            if ((M & 0x4000) != 0) {
++                                const uint32_t dpcClock = uint32_t(time(nullptr)) - dpcClock0;
++                                const uint32_t *V = F5_DMEM(const uint32_t *, 0xC18);
++                                vertex->x = int16_t((dpcClock & shiftR(V[0], 16, 16)) + shiftR(V[2], 16, 16));
++                                vertex->y = int16_t(((dpcClock >> 3) & shiftR(V[0], 0, 16)) + shiftR(V[2], 0, 16));
++                                vertex->z = int16_t(((dpcClock >> 6) & shiftR(V[1], 16, 16)) + shiftR(V[3], 16, 16));
++                                vertex->flag &= uint16_t(shiftR(V[1], 0, 16));
++                            }
++                            else {
++                                Q |= 1U << count;
++                                endCycle = true;
++                                break;
++                            }
++                        }
++                    } while (F1 >= 0);
++                }
++
++                if (!endCycle) {
++                    uint32_t X = shiftL(uint32_t(vertex->x), 12, 16) + uint32_t(int16_t(shiftR(p[4], 16, 16)) * int32_t(corrector));
++                    uint32_t Y = shiftL(uint32_t(vertex->y), 12, 16) + uint32_t(int16_t(shiftR(p[4], 0, 16)) * int32_t(corrector));
++                    uint32_t Z = shiftL(uint32_t(vertex->z), 12, 16) + uint32_t(int16_t(shiftR(p[5], 16, 16)) * int32_t(corrector));
++                    if ((M & 0x0380) != 0) {
++                        uint32_t offset = factorAddr - 0x380;
++                        if ((M & 0x0200) == 0) {
++                            if ((M & 0x080) != 0) {
++                                offset = shiftR(F, 4, 8) & 0xF8;
++                            }
++                            else {
++                                const uint32_t pp = *F5_DMEM(const uint32_t *, lightAddr + 4);
++                                offset = shiftR(pp, 24, 8) << 3;
++                            }
++                        }
++
++                        const uint32_t *factor = F5_DMEM(const uint32_t *, 0x380 + offset);
++                        X += uint32_t(int16_t(shiftR(factor[0], 16, 16)) * int32_t(corrector));
++                        Y += uint32_t(int16_t(shiftR(factor[0], 0, 16)) * int32_t(corrector));
++                        Z += uint32_t(int16_t(shiftR(factor[1], 16, 16)) * int32_t(corrector));
++                    }
++
++                    if ((M & 0x1C00) != 0) {
++                        uint32_t offset = colorAddr - 0x480;
++                        if ((M & 0x1000) == 0) {
++                            if ((M & 0x0400) != 0) {
++                                offset = shiftR(F, 4, 8) & 0xF8;
++                            }
++                            else {
++                                const uint32_t pp = *F5_DMEM(const uint32_t *, lightAddr + 4);
++                                offset = shiftR(pp, 16, 8) << 3;
++                            }
++                        }
++
++                        const uint32_t *factor = F5_DMEM(const uint32_t *, 0x480 + offset);
++                        X += uint32_t(int16_t(shiftR(factor[0], 16, 16)) * int32_t(corrector));
++                        Y += uint32_t(int16_t(shiftR(factor[0], 0, 16)) * int32_t(corrector));
++                        Z += uint32_t(int16_t(shiftR(factor[1], 16, 16)) * int32_t(corrector));
++                    }
++
++                    X = (X << 4) >> 16;
++                    Y = (Y << 4) >> 16;
++                    Z = (Z << 4) >> 16;
++                    vertex->x = int16_t(X);
++                    vertex->y = int16_t(Y);
++                    vertex->z = int16_t(Z);
++                    if ((M & 0x0008) != 0) {
++                        const uint32_t *V = F5_DMEM(const uint32_t *, 0xC00);
++                        const int16_t minX = int16_t(shiftR(V[0], 16, 16)), sizeX = int16_t(shiftR(V[2], 16, 16));
++                        const int16_t minY = int16_t(shiftR(V[0], 0, 16)), sizeY = int16_t(shiftR(V[2], 0, 16));
++                        const int16_t minZ = int16_t(shiftR(V[1], 16, 16)), sizeZ = int16_t(shiftR(V[3], 16, 16));
++                        if (vertex->x < minX) vertex->x += sizeX;
++                        if (vertex->x > minX + sizeX) vertex->x -= sizeX;
++                        if (vertex->y < minY) vertex->y += sizeY;
++                        if (vertex->y > minY + sizeY) vertex->y -= sizeY;
++                        if (vertex->z < minZ) vertex->z += sizeZ;
++                        if (vertex->z > minZ + sizeZ) vertex->z -= sizeZ;
++                    }
++                }
++
++                vtxAddr += 8;
++                lightAddr += 8;
++                factorAddr += 8;
++                colorAddr += 8;
++                U >>= 1;
++                count++;
++            }
++
++            memcpy(state->RDRAM + shiftR(p[2], 0, 24), ctx.dmem.data() + 0x170, 256);
++            if ((M & 0x04) == 0) {
++                *F5_RDRAM(uint32_t *, shiftR(p[3], 0, 24)) = L & (~Q);
++                memcpy(state->RDRAM + shiftR(p[1], 8, 24), ctx.dmem.data() + 0xB00, count * 8);
++            }
++        }
++
++        static uint32_t texrectGenVertexMask(State *state, uint32_t mask, uint32_t limAddr, uint32_t vtxAddr) {
++            const uint32_t *V = F5_DMEM(const uint32_t *, limAddr);
++            const int16_t XL = int16_t(shiftR(V[0], 16, 16));
++            const int16_t YL = int16_t(shiftR(V[0], 0, 16));
++            const int16_t ZL = int16_t(shiftR(V[1], 16, 16));
++            const int16_t XR = int16_t(shiftR(V[2], 16, 16));
++            const int16_t YR = int16_t(shiftR(V[2], 0, 16));
++            const int16_t ZR = int16_t(shiftR(V[3], 16, 16));
++            uint32_t S = 0xFFFFFFFE;
++            const SWVertex *vertex = F5_RDRAM(const SWVertex *, vtxAddr);
++            for (uint32_t i = 0; i < 0x20; i++) {
++                if ((vertex[i].x > XL) && (vertex[i].x < XR) && (vertex[i].y > YL) && (vertex[i].y < YR) && (vertex[i].z > ZL) && (vertex[i].z < ZR)) {
++                    mask &= S;
++                }
++
++                S = (S << 1) | 1;
++            }
++
++            return mask;
++        }
++
++        // Billboards: one screen-space textured rectangle per particle vertex (GLideN64: F5INDI_TexrectGen).
++        static void texrectGen(State *state, const uint32_t *p) {
++            RSP &rsp = *state->rsp;
++            const uint32_t vp = *F5_DMEM(const uint32_t *, 0x130);
++            const uint32_t vpx = shiftR(vp, 17, 15);
++            const uint32_t vpy = shiftR(vp, 1, 15);
++            const uint32_t maxX = (shiftR(p[0], 0, 16) * vpx) >> 16;
++            const uint32_t maxY = (shiftR(p[1], 16, 16) * vpy) >> 16;
++            const uint64_t MX = (p[4] & 0xFFFF0000) | shiftR(p[5], 16, 16);
++            const uint64_t xScale = MX * shiftR(p[7], 16, 16) * vpx;
++            const uint64_t MY = shiftL(p[4], 16, 16) | shiftR(p[5], 0, 16);
++            const uint64_t yScale = MY * shiftR(p[7], 0, 16) * vpy;
++            const uint32_t mp = *F5_DMEM(const uint32_t *, 0x5C8);
++            const uint64_t Q = (p[6] & 0xFFFF0000) | shiftR(mp, 16, 16);
++            const uint64_t R = shiftL(p[6], 16, 16) | shiftR(mp, 0, 16);
++            const uint32_t colorScale = p[3];
++
++            int32_t count = shiftR(p[0], 16, 8);
++            uint32_t vtxAddr = shiftR(p[2], 0, 24);
++            for (; count > 0; --count) {
++                const SWVertex *vertex = F5_RDRAM(const SWVertex *, vtxAddr);
++                loadVertices(state, vertex, 0, 0x20);
++                uint32_t K = p[8];
++                uint32_t B = p[9] & 0xFF;
++                uint32_t limAddr = 0xC28;
++                while (B != 0) {
++                    K = texrectGenVertexMask(state, K, limAddr, vtxAddr);
++                    B--;
++                    limAddr += 0x10;
++                }
++
++                const Workload &workload = currentWorkload(state);
++                for (uint32_t i = 0; i < 0x20; i++) {
++                    const uint32_t D = K & 1;
++                    K >>= 1;
++                    if (D == 0) {
++                        continue;
++                    }
++
++                    const uint32_t globalIndex = rsp.indices[i];
++                    const hlslpp::float4 &clipPos = workload.drawData.posTransformed[globalIndex];
++                    if (clipFlags(clipPos) != 0) {
++                        continue;
++                    }
++
++                    const hlslpp::float3 &screen = workload.drawData.posScreen[globalIndex];
++                    const float screenX = screen.x;
++                    const float screenY = screen.y;
++                    const uint32_t w_i = std::max(1U, uint32_t(float(clipPos.w)));
++                    const uint32_t inv_w = 0xFFFFFFFF / w_i;
++
++                    const uint32_t val = *F5_DMEM(const uint32_t *, 0x480 + shiftR(vertex[i].flag, 8, 8));
++                    const uint32_t A = shiftR(val, 16, 16);
++                    const uint32_t C = shiftR(val, 0, 16);
++
++                    uint64_t offsetXI = (xScale * inv_w) >> 32;
++                    offsetXI = (offsetXI * A) >> 32;
++                    offsetXI = std::clamp<uint64_t>(offsetXI, 4, std::max<uint64_t>(4, maxX));
++                    const float offsetXF = float(offsetXI) / 4.0f;
++                    const float ulx = screenX - offsetXF;
++                    const int32_t G = (screenX - offsetXF > 0.0f) ? 0 : int32_t(screenX - offsetXF);
++                    const float lrx = std::max(0.0f, screenX + offsetXF);
++                    if (lrx - ulx <= 0.0f) {
++                        continue;
++                    }
++
++                    uint64_t offsetYI = (yScale * inv_w) >> 32;
++                    offsetYI = (offsetYI * C) >> 32;
++                    offsetYI = std::clamp<uint64_t>(offsetYI, 4, std::max<uint64_t>(4, maxY));
++                    const float offsetYF = float(offsetYI) / 4.0f;
++                    const float uly = screenY - offsetYF;
++                    const int32_t H = (screenY - offsetYF > 0.0f) ? 0 : int32_t(screenY - offsetYF);
++                    const float lry = std::max(0.0f, screenY + offsetYF);
++                    if (lry - uly <= 0.0f) {
++                        continue;
++                    }
++
++                    const uint64_t Q1 = Q * 0x40 / offsetXI;
++                    const uint16_t dsdxI = uint16_t(Q1 >> 16);
++                    const uint64_t R1 = R * 0x40 / offsetYI;
++                    const uint16_t dtdyI = uint16_t(R1 >> 16);
++
++                    const uint64_t U = std::min<uint64_t>(Q1 * 0x40U, 0x7FFFFFFFU);
++                    const uint16_t U1 = uint16_t(((0 - U) * uint64_t(int64_t(G))) >> 16);
++                    const int16_t S = int16_t((U1 - 2) * 8);
++                    const uint64_t V = std::min<uint64_t>(R1 * 0x40U, 0x7FFFFFFFU);
++                    const uint16_t V1 = uint16_t(((0 - V) * uint64_t(int64_t(H))) >> 16);
++                    const int16_t T = int16_t((V1 - 2) * 8);
++
++                    // TODO: Verify the prim depth scale against RT64's depth convention once it renders.
++                    const float screenZ = std::clamp(float(screen.z), 0.0f, 1.0f);
++                    state->rdp->setPrimDepth(uint16_t(screenZ * 0x7FFF), 0);
++
++                    const uint32_t primColor = *F5_DMEM(const uint32_t *, 0x380 + shiftR(vertex[i].flag, 0, 8));
++                    const uint32_t r = (shiftR(primColor, 24, 8) * shiftR(colorScale, 24, 8)) >> 8;
++                    const uint32_t g = (shiftR(primColor, 16, 8) * shiftR(colorScale, 16, 8)) >> 8;
++                    const uint32_t b = (shiftR(primColor, 8, 8) * shiftR(colorScale, 8, 8)) >> 8;
++                    const uint32_t a = (shiftR(primColor, 0, 8) * shiftR(colorScale, 0, 8)) >> 8;
++                    // TODO: Keep the current LOD fraction and minimum instead of resetting them.
++                    state->rdp->setPrimColor(0, 0, (r << 24) | (g << 16) | (b << 8) | a);
++                    state->rdp->drawTexRect(int32_t(ulx * 4.0f), int32_t(uly * 4.0f), int32_t(lrx * 4.0f), int32_t(lry * 4.0f), 0, S, T, int16_t(dsdxI), int16_t(dtdyI), false);
++                }
++
++                vtxAddr += 0x100;
++            }
++        }
++
++        static void geometryGen(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            const uint32_t mode = shiftR(w1, 0, 8);
++            switch (mode) {
++            case 0x18:
++                genVertices(state, w0, w1);
++                break;
++            case 0x24:
++                doSubDList(state);
++                texrectGen(state, params(*dl));
++                *dl = *dl + 4;
++                break;
++            case 0x27:
++                genParticlesVertices(state, params(*dl));
++                *dl = *dl + 2;
++                break;
++            default:
++                // 0x09, 0x0C, 0x0F, 0x15 and 0x4F are only used by Battle for Naboo.
++                assert(false && "Unimplemented F5INDI geometry generator mode.");
++                break;
++            }
++        }
++
++        // Rectangles.
++
++        static void texrect(State *state, DisplayList **dl) {
++            traceRects++;
++            doSubDList(state);
++
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            const int32_t ulx = shiftR(w1, 12, 12);
++            const int32_t uly = shiftR(w1, 0, 12);
++            const int32_t lrx = shiftR(w0, 12, 12);
++            const int32_t lry = shiftR(w0, 0, 12);
++            const uint8_t tile = uint8_t(shiftR(w1, 24, 3));
++
++            // No RDPHALF commands in this microcode: the second half follows directly (w0 = S/T, w1 = DsDx/DtDy).
++            *dl = *dl + 1;
++            const int16_t uls = int16_t(shiftR((*dl)->w0, 16, 16));
++            const int16_t ult = int16_t(shiftR((*dl)->w0, 0, 16));
++            const int16_t dsdx = int16_t(shiftR((*dl)->w1, 16, 16));
++            const int16_t dtdy = int16_t(shiftR((*dl)->w1, 0, 16));
++            state->rdp->drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, false);
++        }
++
++        // State.
++
++        static void moveWord(State *state, DisplayList **dl) {
++            const uint32_t destAddr = shiftR((*dl)->w0, 0, 12);
++            const uint32_t w1 = (*dl)->w1;
++            *F5_DMEM(uint32_t *, destAddr) = w1;
++            switch (destAddr) {
++            case G_MWO_CLIP_RNX:
++            case G_MWO_CLIP_RNY:
++            case G_MWO_CLIP_RPX:
++            case G_MWO_CLIP_RPY:
++                state->rsp->setClipRatioEdge(uint8_t((destAddr - G_MWO_CLIP_RNX) / 8), int16_t(w1 & 0xFFFFU));
++                break;
++            case 0x14C:
++                state->rsp->setPerspNorm(w1);
++                break;
++            case 0x160:
++            case 0x164: {
++                // Fog multiplier (0x160) and offset (0x164) as s15.16. GLideN64 uses them as the fraction of full fog
++                // (fog = z/w * mul + offset); RT64 divides by 255 instead, so scale by 256 like F3D's s16 values.
++                static uint32_t logged = 0;
++                if (logged++ < 8) {
++                    fprintf(stderr, "[f5indi] fog %s %08X (%g)\n", (destAddr == 0x160) ? "mul" : "offset", w1, double(int32_t(w1)) / 65536.0);
++                }
++
++                RSP &rsp = *state->rsp;
++                const float value = float(int32_t(w1)) / 256.0f;
++                if (destAddr == 0x160) {
++                    rsp.fog.mul = value;
++                }
++                else {
++                    rsp.fog.offset = value;
++                }
++
++                rsp.fogChanged = true;
++                break;
++            }
++            default:
++                // 0x158/0x15C/0x5B0/0x5B4: color factors for MOVEMEM lighting, 0x58C: sub display list address.
++                break;
++            }
++        }
++
++        static void setOtherMode(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            uint32_t mask = uint32_t(int32_t(0x80000000) / (1 << shiftR(w0, 0, 5)));
++            mask >>= shiftR(w0, 8, 5);
++            RSP &rsp = *state->rsp;
++            const interop::OtherMode &otherMode = rsp.otherModeStack[rsp.otherModeStackSize - 1];
++            const uint32_t A0 = shiftR(w0, 16, 3);
++            if (A0 == 0) {
++                rsp.setOtherMode((otherMode.H & (~mask)) | w1, otherMode.L);
++            }
++            else if (A0 == 4) {
++                rsp.setOtherMode(otherMode.H, (otherMode.L & (~mask)) | w1);
++            }
++        }
++
++        static void setOtherModeConditional(State *state, DisplayList **dl) {
++            if (shiftR((*dl)->w0, 23, 1) != *F5_DMEM(const uint32_t *, 0x11C)) {
++                return;
++            }
++
++            setOtherMode(state, dl);
++        }
++
++        static void setGeometryMode(State *state, DisplayList **dl) {
++            state->rsp->setGeometryMode((*dl)->w1);
++        }
++
++        static void clearGeometryMode(State *state, DisplayList **dl) {
++            // The operand is the mask of bits to keep.
++            state->rsp->clearGeometryMode(~(*dl)->w1);
++        }
++
++        static void texture(State *state, DisplayList **dl) {
++            const uint32_t w0 = (*dl)->w0;
++            const uint32_t w1 = (*dl)->w1;
++            state->rsp->setTexture(uint8_t(shiftR(w0, 8, 3)), uint8_t(shiftR(w0, 11, 3)), uint8_t(shiftR(w0, 0, 8)), uint16_t(shiftR(w1, 16, 16)), uint16_t(shiftR(w1, 0, 16)));
++            *F5_DMEM(uint32_t *, 0x148) = w0;
++
++            // Bit 1 of the operand mirrors into the geometry mode.
++            RSP &rsp = *state->rsp;
++            const uint32_t geometryMode = rsp.geometryModeStack[rsp.geometryModeStackSize - 1];
++            if (((geometryMode ^ w0) & 2) != 0) {
++                if (w0 & 2) {
++                    rsp.setGeometryMode(2);
++                }
++                else {
++                    rsp.clearGeometryMode(2);
++                }
++            }
++        }
++
++        static void noOp(State *state, DisplayList **dl) {
++        }
++
++        static void reset(State *state) {
++            // DMEM persists across tasks like in GLideN64 (the HLE never reloads ucode data): the game sets some
++            // state only once, e.g. the indexed vertex base at 0x154. startDisplayList clears the per-list fields.
++            ctx.depth = 0;
++
++            // This microcode only ever forces the full MVP. RT64 still multiplies it with the inverse of the current
++            // projection on the GPU side, which is a zero matrix after RSP::reset, so use identities instead.
++            RSP &rsp = *state->rsp;
++            const int p = rsp.projectionMatrixStackSize - 1;
++            if (float(rsp.projMatrixStack[p][3][3]) == 0.0f && float(rsp.projMatrixStack[p][0][0]) == 0.0f) {
++                rsp.viewMatrixStack[p] = hlslpp::float4x4::identity();
++                rsp.projMatrixStack[p] = hlslpp::float4x4::identity();
++                rsp.viewProjMatrixStack[p] = hlslpp::float4x4::identity();
++                rsp.invViewProjMatrixStack[p] = hlslpp::float4x4::identity();
++                rsp.projectionMatrixInversed = true;
++                rsp.projectionMatrixChanged = true;
++            }
++
++            state->rsp->setLookAtVectors(hlslpp::float3(0.0f, 1.0f, 0.0f), hlslpp::float3(1.0f, 0.0f, 0.0f));
++        }
++
++        void setup(GBI *gbi) {
++            gbi->constants = {
++                { F3DENUM::G_MTX_MODELVIEW, 0x00 },
++                { F3DENUM::G_MTX_PROJECTION, 0x01 },
++                { F3DENUM::G_MTX_MUL, 0x00 },
++                { F3DENUM::G_MTX_LOAD, 0x02 },
++                { F3DENUM::G_MTX_NOPUSH, 0x00 },
++                { F3DENUM::G_MTX_PUSH, 0x04 },
++                { F3DENUM::G_TEXTURE_ENABLE, 0x00000002 },
++                // GLideN64: G_SHADING_SMOOTH = G_SHADE for this microcode.
++                { F3DENUM::G_SHADING_SMOOTH, 0x00000004 },
++                { F3DENUM::G_CULL_FRONT, 0x00001000 },
++                { F3DENUM::G_CULL_BACK, 0x00002000 },
++                { F3DENUM::G_CULL_BOTH, 0x00003000 }
++            };
++
++            gbi->map[F5INDI_SPNOOP] = &noOp;
++            gbi->map[F5INDI_MOVEMEM] = &moveMem;
++            gbi->map[F5INDI_SET_DLIST_ADDR] = &setDListAddr;
++            gbi->map[F5INDI_GEOMETRY_GEN] = &geometryGen;
++            gbi->map[F5INDI_DL] = &runDl;
++            gbi->map[F5INDI_BRANCHDL] = &branchDl;
++            gbi->map[F5INDI_TRI2] = &tri;
++            gbi->map[F5INDI_JUMPDL] = &jumpDl;
++            gbi->map[F5INDI_SETGEOMETRYMODE] = &setGeometryMode;
++            gbi->map[F5INDI_CLEARGEOMETRYMODE] = &clearGeometryMode;
++            gbi->map[F5INDI_ENDDL] = &endDl;
++            gbi->map[F5INDI_SETOTHERMODE_C] = &setOtherModeConditional;
++            gbi->map[F5INDI_SETOTHERMODE] = &setOtherMode;
++            gbi->map[F5INDI_TEXTURE] = &texture;
++            gbi->map[F5INDI_MOVEWORD] = &moveWord;
++            gbi->map[F5INDI_TRI1] = &tri;
++            gbi->map[F5INDI_TEXRECT] = &texrect;
++
++            gbi->resetFromTask = &reset;
++            gbi->startDisplayList = &startDisplayList;
++        }
++
++#       undef F5_DMEM
++#       undef F5_RDRAM
++    }
++};
+diff --git b/src/gbi/rt64_gbi_f5indi.h b/src/gbi/rt64_gbi_f5indi.h
+new file mode 100644
+index 0000000..73d67bd
+--- /dev/null
++++ b/src/gbi/rt64_gbi_f5indi.h
+@@ -0,0 +1,17 @@
++//
++// RT64
++//
++
++#pragma once
++
++#include "rt64_gbi.h"
++
++// Factor 5 microcode of "Indiana Jones and the Infernal Machine" (shared with "Star Wars Episode I: Battle for
++// Naboo"; only the paths Indiana Jones uses are implemented). Port of GLideN64's src/uCodes/F5Indi_Naboo.cpp
++// (microcode decoding by olivieryuyu, GLideN64 is GPL-2.0), see rt64_gbi_f5indi.cpp.
++
++namespace RT64 {
++    namespace GBI_F5INDI {
++        void setup(GBI *gbi);
++    };
++};
+diff --git a/src/hle/rt64_interpreter.cpp b/src/hle/rt64_interpreter.cpp
+index dccaa87..03720ce 100644
+--- a/src/hle/rt64_interpreter.cpp
++++ b/src/hle/rt64_interpreter.cpp
+@@ -1,15 +1,30 @@
+-//
++﻿//
+ // RT64
+ //
+ 
+ #include "rt64_interpreter.h"
+ 
++#include <atomic>
+ #include <cassert>
++#include <mutex>
++#include <string>
+ 
+ //#define DUMP_DISPLAY_LISTS
+ 
+ namespace RT64 {
+     static FILE *displayListFp = nullptr;
++    FILE *displayListDumpFile = nullptr;
++
++    // Indy64 bug reports: number of display lists so far (frame rate watcher) and a one-shot request to dump the
++    // commands of the next display list to a file.
++    std::atomic<uint32_t> indy64DisplayListCount{ 0 };
++    static std::mutex indy64DumpMutex;
++    static std::string indy64DumpRequestPath;
++
++    void requestDisplayListDump(const std::string &path) {
++        std::lock_guard lock(indy64DumpMutex);
++        indy64DumpRequestPath = path;
++    }
+ 
+     // Interpreter
+ 
+@@ -169,8 +184,82 @@ namespace RT64 {
+         DisplayList *dl = dlStart;
+         uint8_t opCode;
+         GBIFunction func;
++        if (hleGBI->startDisplayList != nullptr) {
++            hleGBI->startDisplayList(state, &dl);
++        }
++
++        uint32_t commandCount = 0;
+         while (dl != nullptr) {
+             opCode = (dl->w0 >> 24);
++            static uint32_t dumpedLists = 0;
++            if (commandCount == 0) {
++                dumpedLists++;
++            }
++            // Bring-up aid: INDY64_DUMP_DL=<n>[,<n>...] writes the commands of those display lists to dl_<n>.txt.
++            FILE *&dumpFile = displayListDumpFile;
++            if (commandCount == 0) {
++                if (dumpFile != nullptr) {
++                    fclose(dumpFile);
++                    dumpFile = nullptr;
++                }
++                static const char *dumpList = getenv("INDY64_DUMP_DL");
++                if (dumpList != nullptr) {
++                    for (const char *p = dumpList; *p != '\0'; ) {
++                        char *end = nullptr;
++                        unsigned long n = strtoul(p, &end, 10);
++                        if (end == p) {
++                            break;
++                        }
++                        if (n == dumpedLists) {
++                            char name[64];
++                            snprintf(name, sizeof(name), "dl_%u.txt", dumpedLists);
++                            dumpFile = fopen(name, "w");
++                        }
++                        p = (*end == ',') ? end + 1 : end;
++                    }
++                }
++
++                indy64DisplayListCount++;
++                std::lock_guard lock(indy64DumpMutex);
++                if (!indy64DumpRequestPath.empty() && (dumpFile == nullptr)) {
++                    dumpFile = fopen(indy64DumpRequestPath.c_str(), "w");
++                    indy64DumpRequestPath.clear();
++                }
++            }
++            // Bring-up aid: INDY64_DUMP_RAM=<n>[,<n>...] writes RDRAM (8 MiB, big-endian like the N64) to ram_<n>.bin.
++            if (commandCount == 0) {
++                static const char *dumpRam = getenv("INDY64_DUMP_RAM");
++                bool dumpThis = false;
++                for (const char *p = dumpRam; (p != nullptr) && (*p != '\0'); ) {
++                    char *end = nullptr;
++                    const unsigned long n = strtoul(p, &end, 10);
++                    if (end == p) {
++                        break;
++                    }
++                    dumpThis |= (n == dumpedLists);
++                    p = (*end == ',') ? end + 1 : end;
++                }
++                if (dumpThis) {
++                    char name[64];
++                    snprintf(name, sizeof(name), "ram_%u.bin", dumpedLists);
++                    if (FILE *f = fopen(name, "wb")) {
++                        std::vector<uint8_t> bytes(0x800000);
++                        for (size_t i = 0; i < bytes.size(); i++) {
++                            bytes[i] = state->RDRAM[i ^ 3];
++                        }
++                        fwrite(bytes.data(), 1, bytes.size(), f);
++                        fclose(f);
++                    }
++                }
++            }
++            if (dumpFile != nullptr) {
++                fprintf(dumpFile, "%08X: %08X %08X\n", uint32_t(reinterpret_cast<const uint8_t *>(dl) - state->RDRAM), dl->w0, dl->w1);
++            }
++            // Bring-up guard: a broken list (e.g. a wrong DL address) must not hang the renderer.
++            if (++commandCount > 2000000) {
++                fprintf(stderr, "[rt64] display list aborted after %u commands (last w0 %08X)\n", commandCount, dl->w0);
++                break;
++            }
+ 
+             if ((extendedOpCode != 0) && (opCode == extendedOpCode)) {
+                 extendedFunction(state, &dl);
+@@ -195,6 +284,11 @@ namespace RT64 {
+             }
+         }
+ 
++        static uint32_t tracedLists = 0;
++        if (++tracedLists <= 20 || (tracedLists % 300) == 0) {
++            fprintf(stderr, "[rt64] display list 0x%08X: %u commands\n", dlStartAdddress, commandCount);
++        }
++
+         state->dlCpuProfiler.end();
+     }
+ };
+diff --git a/src/hle/rt64_rsp.cpp b/src/hle/rt64_rsp.cpp
+index d4d9883..5bf851a 100644
+--- a/src/hle/rt64_rsp.cpp
++++ b/src/hle/rt64_rsp.cpp
+@@ -428,6 +428,18 @@ namespace RT64 {
+         vertexColorPDAddress = fromSegmentedMasked(address);
+     }
+ 
++    void RSP::setVertexHost(const Vertex *srcVertices, uint32_t vtxCount, uint32_t dstIndex) {
++        if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
++            assert(false && "Vertex indices are not valid. DL is possibly corrupted.");
++            return;
++        }
++
++        memcpy(&vertices[dstIndex], srcVertices, sizeof(Vertex) * vtxCount);
++
++        // No RDRAM address: extended vertex segments are not supported for these vertices.
++        setVertexCommon<true, sizeof(Vertex)>(0, dstIndex, dstIndex + vtxCount);
++    }
++
+     void RSP::setVertexSegmentV1(bool isEnabled, uint32_t vertexElement, uint32_t vertexAddress, uint32_t baseSegmentAddress) {
+         extended.vertexAddresses[vertexElement] = vertexAddress;
+         extended.baseSegmentAddresses[vertexElement] = baseSegmentAddress;
+@@ -1121,9 +1133,17 @@ namespace RT64 {
+             maxMatrix = std::max(maxMatrix, worldIndices[globalIndex]);
+         }
+ 
++        // Indy64: a corner behind the camera (w <= 0) projects to the opposite side of the screen, so neither the
++        // winding nor the bounds of the projected corners describe the triangle (see the draw rectangle below).
++        const auto &posTransformed = workload.drawData.posTransformed;
++        bool cornerBehind = false;
++        for (int i = 0; i < 3; i++) {
++            cornerBehind |= (float(posTransformed[globalIndices[i]].w) <= 0.0f);
++        }
++
+         bool visibleTri = true;
+         const bool usesCulling = geometryMode & cullBothMask;
+-        if (usesCulling) {
++        if (usesCulling && !cornerBehind) {
+             const hlslpp::float3 U = posScreen[globalIndices[1]] - posScreen[globalIndices[0]];
+             const hlslpp::float3 V = posScreen[globalIndices[2]] - posScreen[globalIndices[0]];
+             const hlslpp::float3 N = hlslpp::cross(V, U);
+@@ -1143,6 +1163,12 @@ namespace RT64 {
+                 drawRect.lry = std::max(drawRect.lry, int32_t(hlslpp::ceil(v.y).x * 4.0f));
+             }
+ 
++            // The color target is sized from this rectangle; the rows a near floor triangle covered below it kept an
++            // old picture (first-person view, crawling). Count the whole scissor for such triangles.
++            if (cornerBehind) {
++                drawRect = scissorRect;
++            }
++
+             drawRect = scissorRect.intersection(drawRect);
+             if (!drawRect.isNull()) {
+                 fbPair.drawColorRect.merge(drawRect);
+diff --git a/src/hle/rt64_rsp.h b/src/hle/rt64_rsp.h
+index e3d289c..c1b8412 100644
+--- a/src/hle/rt64_rsp.h
++++ b/src/hle/rt64_rsp.h
+@@ -219,6 +219,7 @@ namespace RT64 {
+             hlslpp::float4x4 viewMatrix;
+             hlslpp::float4x4 projMatrix;
+             hlslpp::float4x4 viewProjMatrix;
++            hlslpp::float3x3 viewProjRotationMatrix;
+             hlslpp::float4x4 invViewMatrix;
+             hlslpp::float4x4 invProjMatrix;
+             hlslpp::float4x4 invViewProjMatrix;
+@@ -254,6 +255,8 @@ namespace RT64 {
+         void setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
+         void setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
+         void setVertexColorPD(uint32_t address);
++        // Loads vertices that a GBI built itself (for microcodes that keep positions in DMEM, e.g. Factor 5's).
++        void setVertexHost(const Vertex *srcVertices, uint32_t vtxCount, uint32_t dstIndex);
+         void setVertexSegmentV1(bool isEnabled, uint32_t vertexElement, uint32_t vertexAddress, uint32_t baseSegmentAddress);
+         template<uint32_t floatCount, uint32_t vertexSize>
+         void readExtendedVertexSegment(uint32_t rdramAddress, uint32_t dstIndex, uint32_t dstMax, uint32_t globalIndex, uint32_t vertexElement, std::vector<float> &floatsVector);
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index f9f0ad8..10a4018 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -1448,6 +1448,18 @@ namespace RT64 {
+                 pairCursor = framebufferPairCursor;
+                 while (pairCursor < maxFramebufferPair) {
+                     if (getFramebufferPairs(pairCursor)) {
++                        {
++                            // Bring-up aid: report framebuffer write-backs that reach the F5 matrix pool at 0x700000.
++                            const uint32_t rowEnd = std::min(colorRowEnd, colorFb->height);
++                            const uint32_t endAddress = colorFb->addressStart + colorFb->imageRowBytes(colorWriteWidth) * rowEnd;
++                            // Log every distinct write-back region once.
++                            static std::vector<uint64_t> seen;
++                            const uint64_t key = (uint64_t(colorFb->addressStart) << 32) | endAddress;
++                            if ((std::find(seen.begin(), seen.end(), key) == seen.end()) && (seen.size() < 200)) {
++                                seen.push_back(key);
++                                fprintf(stderr, "[rt64] fb write-back %08X width %u rows %u-%u ends at %08X\n", colorFb->addressStart, colorWriteWidth, colorRowStart, rowEnd, endAddress);
++                            }
++                        }
+                         colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+ 
+                         if (depthWriteWidth > 0) {
+@@ -1593,6 +1605,7 @@ namespace RT64 {
+ 
+         if (viHistory.top().vi.visible()) {
+             workload.viFbSize = viHistory.top().vi.fbSize();
++            workload.viPixelAspect = viHistory.top().vi.pixelAspect();
+         }
+ 
+         // Log and reset profilers.
+diff --git a/src/hle/rt64_vi.cpp b/src/hle/rt64_vi.cpp
+index a870166..8d4ef97 100644
+--- a/src/hle/rt64_vi.cpp
++++ b/src/hle/rt64_vi.cpp
+@@ -20,6 +20,15 @@ namespace RT64 {
+     }
+ 
+     hlslpp::float4 VI::cropRectangle() const {
++        // Indiana Jones scissors to width - 1 and height - 1 (e.g. ED000000 0063C6FC for 400x448), so the last column
++        // and row are never drawn and show whatever was left in RDRAM (a speckled stripe on the right). Hide them.
++        const hlslpp::uint2 size = fbSize();
++        const float width = float(uint32_t(size.x));
++        const float height = float(uint32_t(size.y));
++        if ((width > 1.0f) && (height > 1.0f)) {
++            return { 0.0f, 0.0f, (width - 1.0f) / width, (height - 1.0f) / height };
++        }
++
+         return { 0.0f, 0.0f, 1.0f, 1.0f };
+     }
+ 
+@@ -81,7 +90,11 @@ namespace RT64 {
+         // Estimate the origin is off by one or two rows.
+         if (siz >= G_IM_SIZ_16b) {
+             const bool interlacedStep = status.serrate && (vCurrentLine & 0x1);
+-            const uint32_t rowBytes = width * (1U << (siz - 1));
++            // In interlaced modes with a doubled stride the origin is offset by rows of the framebuffer's own width
++            // (Indiana Jones: VI width 1024 for a 512 wide framebuffer, origin +0x400).
++            const uint32_t fbWidth = fbSize().x;
++            const uint32_t rowWidth = ((fbWidth > 0) && (fbWidth < width)) ? fbWidth : width;
++            const uint32_t rowBytes = rowWidth * (1U << (siz - 1));
+             const uint32_t rowCount = interlacedStep ? 2 : 1;
+             const uint32_t rowOffset = rowBytes * rowCount;
+             if (origin >= rowOffset) {
+@@ -140,6 +153,20 @@ namespace RT64 {
+         return yTransform.yOffset / 1024.0f;
+     }
+ 
++    // Width of a framebuffer pixel on screen relative to its height, as the VI scales it. 1 for the common modes
++    // (320x240 or 640x480), 1.6 for Indiana Jones (400 pixels stretched to 640, 448 interlaced lines).
++    float VI::pixelAspect() const {
++        if ((xTransform.xScale == 0) || (yTransform.yScale == 0)) {
++            return 1.0f;
++        }
++
++        // With a doubled stride (interlaced, VI width twice the framebuffer width) one VI line covers two framebuffer
++        // rows, so each row is half as tall (Indiana Jones menus: 512 pixels, VI width 1024).
++        const uint32_t fbWidth = fbSize().x;
++        const float rowsPerLine = ((fbWidth > 0) && (fbWidth < width)) ? float(width) / float(fbWidth) : 1.0f;
++        return std::clamp(xScaleFloat() * rowsPerLine / (2.0f * yScaleFloat()), 0.25f, 4.0f);
++    }
++
+     // VIHistory
+ 
+     VIHistory::VIHistory() {
+diff --git a/src/hle/rt64_vi.h b/src/hle/rt64_vi.h
+index 5b70e01..f9831df 100644
+--- a/src/hle/rt64_vi.h
++++ b/src/hle/rt64_vi.h
+@@ -145,6 +145,7 @@ namespace RT64 {
+         float xOffsetFloat() const;
+         float yScaleFloat() const;
+         float yOffsetFloat() const;
++        float pixelAspect() const;
+         hlslpp::float4 viewRectangle() const;
+         hlslpp::float4 cropRectangle() const;
+         float gamma() const;
+diff --git a/src/hle/rt64_workload.h b/src/hle/rt64_workload.h
+index 8ea27d5..df0f795 100644
+--- a/src/hle/rt64_workload.h
++++ b/src/hle/rt64_workload.h
+@@ -226,6 +226,7 @@ namespace RT64 {
+         FramebufferStorage fbStorage;
+         uint32_t viOriginalRate;
+         hlslpp::uint2 viFbSize = {};
++        float viPixelAspect = 1.0f;
+         DebuggerRenderer debuggerRenderer;
+         DebuggerCamera debuggerCamera;
+         std::multimap<uint32_t, uint32_t> transformIdMap;
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5a331aa..646efc0 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -120,7 +120,7 @@ namespace RT64 {
+         framebufferRenderer->updateMultisampling();
+     }
+ 
+-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
++    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, WorkloadConfiguration &workloadConfig) {
+         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
+         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
+         ext.sharedResources->swapChainSizeChanged = false;
+@@ -131,7 +131,8 @@ namespace RT64 {
+         const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
+ 
+         // Compute the aspect ratio to be used for the frame.
+-        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
++        // The ratio as shown on screen: the VI may stretch the framebuffer pixels horizontally (VIRenderer does too).
++        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? (float(viFbSize[0]) * viPixelAspect) / float(viFbSize[1]) : (4.0f / 3.0f);
+ 
+         const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
+         switch (ratioMode) {
+@@ -912,7 +913,7 @@ namespace RT64 {
+ 
+                 ElapsedTimer workloadTimer;
+                 workloadProfiler.start();
+-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
++                threadConfigurationUpdate(workload.viFbSize, workload.viPixelAspect, workloadConfig);
+ 
+                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
+                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
+diff --git a/src/hle/rt64_workload_queue.h b/src/hle/rt64_workload_queue.h
+index bde2f03..1541235 100644
+--- a/src/hle/rt64_workload_queue.h
++++ b/src/hle/rt64_workload_queue.h
+@@ -111,7 +111,7 @@ namespace RT64 {
+         void waitForWorkloadId(uint64_t waitId);
+         void setup(const External &ext);
+         void updateMultisampling();
+-        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig);
++        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, WorkloadConfiguration &workloadConfig);
+         void threadConfigurationValidate();
+         void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
+             const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
+diff --git a/src/render/rt64_vi_renderer.cpp b/src/render/rt64_vi_renderer.cpp
+index b4ff4e9..78298c5 100644
+--- a/src/render/rt64_vi_renderer.cpp
++++ b/src/render/rt64_vi_renderer.cpp
+@@ -101,7 +101,8 @@ namespace RT64 {
+         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
+         // specified by the VI.
+         const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
+-        const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
++        // Stretch horizontally like the VI does (Indiana Jones: 400 pixels shown 640 wide).
++        const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale) * hlslpp::float2(vi.pixelAspect(), 1.0f);
+         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
+ 
+         // Query the VI for the current rendering area.

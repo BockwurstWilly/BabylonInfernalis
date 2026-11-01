@@ -1,0 +1,77 @@
+diff --git a/recompinput/include/recompinput/input_events.h b/recompinput/include/recompinput/input_events.h
+index 5f4420f..accb88b 100644
+--- a/recompinput/include/recompinput/input_events.h
++++ b/recompinput/include/recompinput/input_events.h
+@@ -3,6 +3,9 @@
+ #include "recompinput.h"
+ 
+ namespace recompinput {
++    // Called for every SDL event before the frontend handles it (Indy64: bug-report hotkey, controller logging).
++    extern void (*sdl_event_hook)(const SDL_Event* event);
++
+     void handle_events();
+     void purge_deferred_controller_profiles();
+ }
+diff --git a/recompinput/src/input_events.cpp b/recompinput/src/input_events.cpp
+index c76a1dc..d425040 100644
+--- a/recompinput/src/input_events.cpp
++++ b/recompinput/src/input_events.cpp
+@@ -38,7 +38,13 @@ void purge_deferred_controller_profiles() {
+     deferred_controller_profiles.clear();
+ }
+ 
++void (*sdl_event_hook)(const SDL_Event* event) = nullptr;
++
+ bool sdl_event_filter(void* userdata, SDL_Event* event) {
++    if (sdl_event_hook != nullptr) {
++        sdl_event_hook(event);
++    }
++
+     switch (event->type) {
+     case SDL_EventType::SDL_KEYDOWN:
+     {
+diff --git a/recompui/src/config/ui_config_tab_graphics.cpp b/recompui/src/config/ui_config_tab_graphics.cpp
+index 4fdf81f..28a7734 100644
+--- a/recompui/src/config/ui_config_tab_graphics.cpp
++++ b/recompui/src/config/ui_config_tab_graphics.cpp
+@@ -288,7 +288,7 @@ namespace recompui {
+                 "Aspect Ratio",
+                 "Sets the horizontal aspect ratio. <recomp-color primary>Original</recomp-color> uses the game's original 4:3 aspect ratio. <recomp-color primary>Expand</recomp-color> will adjust to match the game window's aspect ratio.",
+                 aspect_ratio_options,
+-                ultramodern::renderer::AspectRatio::Expand
++                ultramodern::renderer::AspectRatio::Original
+             );
+ 
+             config.add_enum_option(
+@@ -304,7 +304,7 @@ namespace recompui {
+                 "Framerate",
+                 get_framerate_text(60),
+                 refresh_rate_options,
+-                ultramodern::renderer::RefreshRate::Display
++                ultramodern::renderer::RefreshRate::Original
+             );
+ 
+             config.add_number_option(
+diff --git a/recompui/src/renderer/rt64_render_context.cpp b/recompui/src/renderer/rt64_render_context.cpp
+index a7954c7..506c34a 100644
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -171,9 +171,16 @@ void set_application_user_config(RT64::Application* application, const ultramode
+             break;
+     }
+ 
+-    application->userConfig.aspectRatio = to_rt64(config.ar_option);
++    // Indy64: widescreen widens the projection, but the portal engine only draws what the original 4:3 view shows
++    // (missing walls at the sides, holes). Keep the original ratio until the game is patched for it.
++    (void)to_rt64(config.ar_option);
++    application->userConfig.aspectRatio = RT64::UserConfiguration::AspectRatio::Original;
+     application->userConfig.antialiasing = to_rt64(config.msaa_option);
+-    application->userConfig.refreshRate = to_rt64(config.rr_option);
++    // Indy64: RT64 pairs transforms between frames by matrix address for its interpolated frames, but the game hands
++    // out its matrix pool anew every frame, so interpolation mixes up objects (doubled Indy, smeared walls). Until the
++    // matrices carry group ids, always render at the original framerate.
++    (void)to_rt64(config.rr_option);
++    application->userConfig.refreshRate = RT64::UserConfiguration::RefreshRate::Original;
+     application->userConfig.refreshRateTarget = config.rr_manual_value;
+     application->userConfig.internalColorFormat = to_rt64(config.hpfb_option);
+     application->userConfig.displayBuffering = RT64::UserConfiguration::DisplayBuffering::Triple;

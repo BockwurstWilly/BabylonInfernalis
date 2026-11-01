@@ -1,0 +1,58 @@
+# Allow-list: everything in this folder is ignored unless it is listed here. This keeps the ROM, the code generated
+# from it, RAM dumps, the Ghidra project and reference material out of the repository.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/README.de.md
+!/BUILDING.md
+!/CHANGELOG.md
+!/THIRD_PARTY_NOTICES.md
+!/LICENSE
+!/NOTES.md
+!/deps/
+!/recomp/
+!/tools/
+!/indy64recomp/
+
+# Generated from the ROM by tools/generate_code.cmd: derived from the game, never commit.
+/recomp/RecompiledFuncs/
+/recomp/rsp/*.cpp
+/recomp/*.log
+
+# The port: only its own sources. Libraries in lib/ are fetched by tools/setup_deps.py (except SlotMap).
+/indy64recomp/*
+!/indy64recomp/CMakeLists.txt
+!/indy64recomp/LICENSE
+!/indy64recomp/.clang-format
+!/indy64recomp/recompcontrollerdb.txt
+!/indy64recomp/src/
+!/indy64recomp/include/
+!/indy64recomp/assets/
+!/indy64recomp/icons/
+!/indy64recomp/patches/
+!/indy64recomp/lib/
+/indy64recomp/lib/*
+!/indy64recomp/lib/SlotMap/
+
+# Development leftovers inside the allowed folders.
+/tools/.venv/
+/tools/tests/*.exe
+/tools/tests/*.obj
+__pycache__/
+*.pyc
+
+# Never: ROMs, saves, dumps, logs, build output.
+*.z64
+*.n64
+*.v64
+*.bak
+*.bin
+*.raw
+*.wav
+*.log
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj

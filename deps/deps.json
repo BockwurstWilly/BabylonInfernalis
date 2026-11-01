@@ -1,0 +1,34 @@
+{
+  "comment": "Libraries in indy64recomp/lib: upstream repository and commit (fetched with all submodules by tools/setup_deps.py), plus our changes in deps/patches/<name>.patch (made by tools/make_dep_patches.py).",
+  "libraries": [
+    {
+      "name": "N64ModernRuntime",
+      "repo": "N64Recomp/N64ModernRuntime",
+      "commit": "ca568b6ad79b9029d14077f0c3ffa757727c5559",
+      "path": "lib/N64ModernRuntime",
+      "cache_zip": "N64Recomp_N64ModernRuntime_ca568b6.zip"
+    },
+    {
+      "name": "N64Recomp",
+      "repo": "N64Recomp/N64Recomp",
+      "commit": "2b6f05688de2abc7d86da5b4a89b84c2c6acbabe",
+      "path": "lib/N64ModernRuntime/N64Recomp",
+      "cache_zip": "N64Recomp_N64Recomp_2b6f056.zip",
+      "submodule_of": "N64ModernRuntime"
+    },
+    {
+      "name": "rt64",
+      "repo": "rt64/rt64",
+      "commit": "f0d8c9f29b579a143744f76c222899dc82c12e81",
+      "path": "lib/rt64",
+      "cache_zip": "rt64_rt64_f0d8c9f.zip"
+    },
+    {
+      "name": "RecompFrontend",
+      "repo": "N64Recomp/RecompFrontend",
+      "commit": "b3b7ebb4ec1a8a763c0191486f1b3329f9499a48",
+      "path": "lib/RecompFrontend",
+      "cache_zip": "N64Recomp_RecompFrontend_b3b7ebb.zip"
+    }
+  ]
+}

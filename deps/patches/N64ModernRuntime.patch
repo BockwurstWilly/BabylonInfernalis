@@ -1,0 +1,915 @@
+diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
+index 748558c..3f08163 100644
+--- a/librecomp/include/librecomp/rsp.hpp
++++ b/librecomp/include/librecomp/rsp.hpp
+@@ -94,7 +94,11 @@ static inline void RSP_MEM_H_STORE(uint32_t offset, uint32_t addr, uint32_t val)
+ #define DO_DMA_READ(rd_len) dma_rdram_to_dmem(rdram, dma_mem_address, dma_dram_address, (rd_len))
+ #define DO_DMA_WRITE(wr_len) dma_dmem_to_rdram(rdram, dma_mem_address, dma_dram_address, (wr_len))
+ 
++// Bring-up aid (Indy64): INDY64_RSP_DMA_RANGE=<start hex>,<end hex> logs microcode reads from that RDRAM range.
++void indy64_log_rsp_read(uint32_t dram_addr, uint32_t len);
++
+ static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len) {
++    indy64_log_rsp_read(dram_addr, rd_len);
+     rd_len += 1; // Read length is inclusive
+     dram_addr &= 0xFFFFF8;
+     assert(dmem_addr + rd_len <= 0x1000);
+@@ -103,13 +107,20 @@ static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_
+     }
+ }
+ 
++// Bring-up aid (Indy64): INDY64_RSP_WRITE_LOG=1 logs the first microcode writes to RDRAM.
++void indy64_log_rsp_write(uint32_t dmem_addr, uint32_t dram_addr, uint32_t len);
++// INDY64_MIX_CAPTURE=<file>: appends every 0x480-byte write (the 3-channel mix of the MusyX microcode) to the file.
++void indy64_capture_rsp_write(uint8_t* rdram, uint32_t dram_addr, uint32_t len);
++
+ static inline void dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t wr_len) {
++    indy64_log_rsp_write(dmem_addr, dram_addr, wr_len);
+     wr_len += 1; // Write length is inclusive
+     dram_addr &= 0xFFFFF8;
+     assert(dmem_addr + wr_len <= 0x1000);
+     for (uint32_t i = 0; i < wr_len; i++) {
+         MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000)) = RSP_MEM_B(i, dmem_addr);
+     }
++    indy64_capture_rsp_write(rdram, dram_addr, wr_len);
+ }
+ 
+ namespace recomp {
+diff --git a/librecomp/src/ai.cpp b/librecomp/src/ai.cpp
+index 0195f2b..e8c89d2 100644
+--- a/librecomp/src/ai.cpp
++++ b/librecomp/src/ai.cpp
+@@ -16,6 +16,10 @@ extern "C" void osAiSetFrequency_recomp(uint8_t* rdram, recomp_context* ctx) {
+ }
+ 
+ extern "C" void osAiSetNextBuffer_recomp(uint8_t* rdram, recomp_context* ctx) {
++    static uint32_t logged = 0;
++    if (logged++ < 6) {
++        fprintf(stderr, "[audio] ai buffer %08X bytes %X\n", (uint32_t)ctx->r4, (uint32_t)ctx->r5);
++    }
+     ultramodern::queue_audio_buffer(rdram, ctx->r4, ctx->r5);
+     ctx->r2 = 0;
+ }
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index 8c8e5d1..5990a0b 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -366,6 +366,10 @@ extern "C" recomp_func_t * get_function(int32_t addr) {
+     if (func_find == func_map.end()) {
+         fprintf(stderr, "Failed to find function at 0x%08X\n", addr);
+         assert(false);
++#ifdef _WIN32
++        // Indy64: let the game's crash log record the call stack of the bad call.
++        __debugbreak();
++#endif
+         std::exit(EXIT_FAILURE);
+     }
+     return func_find->second;
+diff --git a/librecomp/src/pi.cpp b/librecomp/src/pi.cpp
+index 62656ad..61114e6 100644
+--- a/librecomp/src/pi.cpp
++++ b/librecomp/src/pi.cpp
+@@ -1,3 +1,6 @@
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
+ #include <memory>
+ #include <fstream>
+ #include <array>
+@@ -266,16 +269,25 @@ void ultramodern::join_saving_thread() {
+     }
+ }
+ 
+-void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction) {
++// The completion message is the OSIoMesg of the request, as in libultra (the PI manager sends the message block back).
++// Indiana Jones streams sound with several requests on one queue and tells them apart by that pointer.
++void do_dma(RDRAM_ARG PTR(OSMesgQueue) mq, gpr rdram_address, uint32_t physical_addr, uint32_t size, uint32_t direction, OSMesg done_msg = 0) {
+     // TODO asynchronous transfer
+     // TODO implement unaligned DMA correctly
+     if (direction == 0) {
+         if (physical_addr >= recomp::rom_base) {
++            // Bring-up aid (Indy64): INDY64_PI_LOG=1 logs every cart read.
++            static const bool pi_log = getenv("INDY64_PI_LOG") != nullptr;
++            if (pi_log) {
++                static const auto start = std::chrono::steady_clock::now();
++                const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
++                fprintf(stderr, "[pi] %lld ms rom %08X -> %08X size %X msg %08X\n", ms, physical_addr - recomp::rom_base, (uint32_t)rdram_address, size, (uint32_t)done_msg);
++            }
+             // read cart rom
+             recomp::do_rom_read(rdram, rdram_address, physical_addr, size);
+ 
+             // Send a message to the mq to indicate that the transfer completed
+-            ultramodern::enqueue_external_message(mq, 0, false, true);
++            ultramodern::enqueue_external_message(mq, done_msg, false, true);
+         } else if (physical_addr >= recomp::sram_base) {
+             if (!recomp::sram_allowed()) {
+                 ultramodern::error_handling::message_box("Attempted to use SRAM saving with other save type");
+@@ -321,7 +333,22 @@ extern "C" void osPiStartDma_recomp(RDRAM_ARG recomp_context* ctx) {
+ 
+     debug_printf("[pi] DMA from 0x%08X into 0x%08X of size 0x%08X\n", devAddr, dramAddr, size);
+ 
+-    do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction);
++    // Fill in the I/O message like libultra's osPiStartDma does. The game receives it back as the completion message
++    // and reads dramAddr/devAddr/size from it (Indiana Jones' MusyX sample streaming; empty blocks kept the speech
++    // samples from ever "arriving", so Indy stayed silent).
++    if (mb != 0) {
++        OSIoMesg* io = TO_PTR(OSIoMesg, mb);
++        io->hdr.type = (direction == 0) ? 10 : 11; // OS_MESG_TYPE_DMAREAD / DMAWRITE
++        io->hdr.pri = uint8_t(pri);
++        io->hdr.status = 0;
++        io->hdr.retQueue = mq;
++        io->dramAddr = dramAddr;
++        io->devAddr = ctx->r7;
++        io->size = size;
++        io->piHandle = 0;
++    }
++
++    do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction, OSMesg(mb));
+ 
+     ctx->r2 = 0;
+ }
+@@ -338,7 +365,7 @@ extern "C" void osEPiStartDma_recomp(RDRAM_ARG recomp_context* ctx) {
+ 
+     debug_printf("[pi] DMA from 0x%08X into 0x%08X of size 0x%08X\n", devAddr, dramAddr, size);
+ 
+-    do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction);
++    do_dma(PASS_RDRAM mq, dramAddr, physical_addr, size, direction, OSMesg(ctx->r5));
+ 
+     ctx->r2 = 0;
+ }
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 1200f77..f168d3d 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -1,7 +1,9 @@
++#include <algorithm>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <memory>
++#include <vector>
+ #include <cmath>
+ #include <unordered_map>
+ #include <unordered_set>
+@@ -21,6 +23,7 @@
+ #include "xxHash/xxh3.h"
+ #include "ultramodern/ultramodern.hpp"
+ #include "ultramodern/error_handling.hpp"
++#include "ultramodern/tlb_mappings.hpp"
+ #include "librecomp/addresses.hpp"
+ #include "librecomp/mods.hpp"
+ #include "recompiler/live_recompiler.h"
+@@ -44,6 +47,121 @@ enum GameStatus {
+     Quit
+ };
+ 
++#ifdef _WIN32
++// RDRAM as a pagefile-backed section, mapped once for kseg0 (offset 0) and again for every fixed TLB mapping in
++// ultramodern::tlb_mappings, so all those addresses reach the same memory (Indy64 addition). Uses the placeholder
++// APIs of Windows 10 1803+, loaded dynamically so no newer import library is needed.
++#ifndef MEM_RESERVE_PLACEHOLDER
++#define MEM_RESERVE_PLACEHOLDER 0x00040000
++#endif
++#ifndef MEM_REPLACE_PLACEHOLDER
++#define MEM_REPLACE_PLACEHOLDER 0x00004000
++#endif
++#ifndef MEM_PRESERVE_PLACEHOLDER
++#define MEM_PRESERVE_PLACEHOLDER 0x00000002
++#endif
++
++namespace {
++    using VirtualAlloc2_t = PVOID(WINAPI*)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, void*, ULONG);
++    using MapViewOfFile3_t = PVOID(WINAPI*)(HANDLE, HANDLE, PVOID, ULONG64, SIZE_T, ULONG, ULONG, void*, ULONG);
++
++    struct RdramMapping {
++        HANDLE section = nullptr;
++        std::vector<void*> views;
++        std::vector<void*> placeholders;
++    };
++
++    RdramMapping rdram_mapping;
++
++    // Offset of a 32-bit address inside the rdram allocation (MEM_* use rdram + addr - 0x80000000).
++    constexpr size_t rdram_offset(uint32_t address) {
++        return size_t(uint32_t(address - 0x80000000u));
++    }
++
++    uint8_t* allocate_rdram_mapped() {
++        HMODULE kernelbase = GetModuleHandleW(L"kernelbase.dll");
++        auto virtual_alloc2 = reinterpret_cast<VirtualAlloc2_t>(GetProcAddress(kernelbase, "VirtualAlloc2"));
++        auto map_view_of_file3 = reinterpret_cast<MapViewOfFile3_t>(GetProcAddress(kernelbase, "MapViewOfFile3"));
++        if (virtual_alloc2 == nullptr || map_view_of_file3 == nullptr) {
++            fprintf(stderr, "VirtualAlloc2/MapViewOfFile3 are not available (Windows 10 1803 or newer is required)\n");
++            return nullptr;
++        }
++
++        uint8_t* base = reinterpret_cast<uint8_t*>(virtual_alloc2(nullptr, nullptr, recomp::allocation_size,
++            MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0));
++        if (base == nullptr) {
++            return nullptr;
++        }
++
++        // The views: kseg0 RDRAM, then every TLB mapping (offset in the allocation, offset in the section, size).
++        struct View { size_t offset; size_t section_offset; size_t size; };
++        std::vector<View> views{ { 0, 0, recomp::mem_size } };
++        for (const ultramodern::TlbMapping& mapping : ultramodern::tlb_mappings) {
++            views.push_back({ rdram_offset(mapping.virtual_address), mapping.physical_address, mapping.size });
++        }
++
++        std::sort(views.begin(), views.end(), [](const View& a, const View& b) { return a.offset < b.offset; });
++
++        // Split the placeholder so each view gets one of its own; the gaps stay reserved and inaccessible.
++        size_t cursor = 0;
++        for (const View& view : views) {
++            if (view.offset < cursor || view.offset + view.size > recomp::allocation_size) {
++                fprintf(stderr, "Overlapping or out of range rdram view at offset 0x%zX\n", view.offset);
++                VirtualFree(base, 0, MEM_RELEASE);
++                return nullptr;
++            }
++            if (view.offset > cursor) {
++                rdram_mapping.placeholders.push_back(base + cursor);
++            }
++            if (view.offset + view.size < recomp::allocation_size &&
++                !VirtualFree(base + view.offset, view.size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)) {
++                fprintf(stderr, "Failed to split rdram placeholder (error %lu)\n", GetLastError());
++                return nullptr;
++            }
++            cursor = view.offset + view.size;
++        }
++        if (cursor < recomp::allocation_size) {
++            rdram_mapping.placeholders.push_back(base + cursor);
++        }
++
++        const ULARGE_INTEGER section_size{ .QuadPart = recomp::mem_size };
++        rdram_mapping.section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
++            section_size.HighPart, section_size.LowPart, nullptr);
++        if (rdram_mapping.section == nullptr) {
++            fprintf(stderr, "Failed to create the rdram section (error %lu)\n", GetLastError());
++            return nullptr;
++        }
++
++        for (const View& view : views) {
++            void* mapped = map_view_of_file3(rdram_mapping.section, GetCurrentProcess(), base + view.offset,
++                view.section_offset, view.size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, nullptr, 0);
++            if (mapped == nullptr) {
++                fprintf(stderr, "Failed to map rdram view at offset 0x%zX (error %lu)\n", view.offset, GetLastError());
++                return nullptr;
++            }
++            rdram_mapping.views.push_back(mapped);
++        }
++
++        return base;
++    }
++
++    [[maybe_unused]] bool free_rdram_mapped() {
++        bool ok = true;
++        for (void* view : rdram_mapping.views) {
++            ok &= (UnmapViewOfFile(view) != 0);
++        }
++        for (void* placeholder : rdram_mapping.placeholders) {
++            ok &= (VirtualFree(placeholder, 0, MEM_RELEASE) != 0);
++        }
++        if (rdram_mapping.section != nullptr) {
++            CloseHandle(rdram_mapping.section);
++        }
++        rdram_mapping = {};
++        return ok;
++    }
++}
++#endif
++
+ // Mutexes
+ std::mutex game_roms_mutex;
+ std::mutex current_game_mutex;
+@@ -841,16 +959,9 @@ void recomp::start(
+     uint8_t* rdram;
+     bool alloc_failed;
+ #ifdef _WIN32
+-    rdram = reinterpret_cast<uint8_t*>(VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+-    DWORD old_protect = 0;
++    // Indy64: mapped section instead of VirtualAlloc, so the fixed TLB mappings alias RDRAM.
++    rdram = allocate_rdram_mapped();
+     alloc_failed = (rdram == nullptr);
+-    if (!alloc_failed) {
+-        // VirtualProtect returns 0 on failure.
+-        alloc_failed = (VirtualProtect(rdram, mem_size, PAGE_READWRITE, &old_protect) == 0);
+-        if (alloc_failed) {
+-            VirtualFree(rdram, 0, MEM_RELEASE);
+-        }
+-    }
+ #else
+     rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
+@@ -902,8 +1013,9 @@ void recomp::start(
+     // Free rdram.
+     bool free_failed;
+ #ifdef _WIN32
+-    // VirtualFree returns zero on failure.
+-    free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
++    // Indy64: game threads blocked on message queues are never joined and may still run here; freeing rdram made
++    // them crash on exit. The process ends right after this, which releases the mapping anyway.
++    free_failed = false;
+ #else
+     // munmap returns -1 on failure.
+     free_failed = (munmap(rdram, allocation_size) == -1);
+diff --git a/librecomp/src/rsp.cpp b/librecomp/src/rsp.cpp
+index 1cb3f6a..e077507 100644
+--- a/librecomp/src/rsp.cpp
++++ b/librecomp/src/rsp.cpp
+@@ -1,4 +1,5 @@
+ #include <cassert>
++#include <cstdlib>
+ #include <cstring>
+ #include <cinttypes>
+ 
+@@ -32,6 +33,47 @@ void recomp::rsp::constants_init() {
+     }
+ }
+ 
++void indy64_log_rsp_read(uint32_t dram_addr, uint32_t len) {
++    static uint32_t range_start = 0, range_end = 0;
++    static bool parsed = false;
++    if (!parsed) {
++        parsed = true;
++        if (const char* range = getenv("INDY64_RSP_DMA_RANGE")) {
++            char* comma = nullptr;
++            range_start = uint32_t(strtoul(range, &comma, 16));
++            range_end = (comma && *comma == ',') ? uint32_t(strtoul(comma + 1, nullptr, 16)) : range_start;
++        }
++    }
++    const uint32_t phys = dram_addr & 0xFFFFF8;
++    if ((range_end != 0) && (phys >= range_start) && (phys < range_end)) {
++        static uint32_t count = 0;
++        if (count++ < 2000) {
++            fprintf(stderr, "[rsp-read] %08X len %X\n", dram_addr, len + 1);
++        }
++    }
++}
++
++void indy64_log_rsp_write(uint32_t dmem_addr, uint32_t dram_addr, uint32_t len) {
++    static const bool enabled = getenv("INDY64_RSP_WRITE_LOG") != nullptr;
++    static uint32_t count = 0;
++    if (enabled && (count++ < 400)) {
++        fprintf(stderr, "[rsp-write] dmem %03X -> %08X len %X\n", dmem_addr, dram_addr, len + 1);
++    }
++}
++
++void indy64_capture_rsp_write(uint8_t* rdram, uint32_t dram_addr, uint32_t len) {
++    static FILE* f = getenv("INDY64_MIX_CAPTURE") ? fopen(getenv("INDY64_MIX_CAPTURE"), "wb") : nullptr;
++    if ((f == nullptr) || (len != 0x480)) {
++        return;
++    }
++    uint8_t bytes[0x480];
++    for (uint32_t i = 0; i < len; i++) {
++        bytes[i] = MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000));
++    }
++    fwrite(bytes, 1, len, f);
++    fflush(f);
++}
++
+ // Runs a recompiled RSP microcode
+ bool recomp::rsp::run_task(uint8_t* rdram, const OSTask* task) {
+     assert(rsp_callbacks.get_rsp_microcode != nullptr);
+diff --git a/librecomp/src/ultra_translation.cpp b/librecomp/src/ultra_translation.cpp
+index e0d367e..d47e008 100644
+--- a/librecomp/src/ultra_translation.cpp
++++ b/librecomp/src/ultra_translation.cpp
+@@ -28,9 +28,11 @@ extern "C" void osDestroyThread_recomp(uint8_t * rdram, recomp_context * ctx) {
+     osDestroyThread(rdram, (int32_t)ctx->r4);
+ }
+ 
++extern "C" void yield_to_ready_or_wait(uint8_t* rdram);
++
+ extern "C" void osYieldThread_recomp(uint8_t * rdram, recomp_context * ctx) {
+-    assert(false);
+-    // osYieldThread(rdram);
++    // Indy64: the game's idle thread loops on osYieldThread, so this has to be a real scheduling point.
++    yield_to_ready_or_wait(rdram);
+ }
+ 
+ extern "C" void osSetThreadPri_recomp(uint8_t* rdram, recomp_context* ctx) {
+diff --git b/ultramodern/include/ultramodern/tlb_mappings.hpp b/ultramodern/include/ultramodern/tlb_mappings.hpp
+new file mode 100644
+index 0000000..49c7975
+--- /dev/null
++++ b/ultramodern/include/ultramodern/tlb_mappings.hpp
+@@ -0,0 +1,28 @@
++#ifndef __ULTRAMODERN_TLB_MAPPINGS_HPP__
++#define __ULTRAMODERN_TLB_MAPPINGS_HPP__
++
++#include <cstdint>
++
++// Fixed TLB mappings of the game, emulated by mapping the same memory at several addresses (Indy64 addition).
++//
++// Indiana Jones and the Infernal Machine runs with a TLB entry that maps virtual 0x40000000-0x407FFFFF onto
++// RDRAM, and keeps a second code/data segment at virtual 0x41000000 (demand-paged from ROM on the N64). librecomp
++// maps these ranges as additional views of the RDRAM allocation, so 0x40xxxxxx, 0x80xxxxxx and the physical
++// address used by RSP/RDP/DMA all reach the same bytes. osVirtualToPhysical uses the same table.
++namespace ultramodern {
++    struct TlbMapping {
++        uint32_t virtual_address;
++        uint32_t physical_address;
++        uint32_t size;
++    };
++
++    inline constexpr TlbMapping tlb_mappings[] = {
++        // All 16 MiB of (extended) RDRAM, the game's own TLB entry 0 covers the first 8 MiB.
++        { 0x40000000u, 0x00000000u, 0x01000000u },
++        // Second segment ("VM window", ROM 0x4DC30, 0xBE620 bytes). Placed in an unused part of extended RDRAM,
++        // between librecomp's handles/patch data (0x80800000+) and the mod/heap area (0x81000000+).
++        { 0x41000000u, 0x00C00000u, 0x00100000u },
++    };
++}
++
++#endif
+diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
+index 3b28af3..04cf592 100644
+--- a/ultramodern/include/ultramodern/ultramodern.hpp
++++ b/ultramodern/include/ultramodern/ultramodern.hpp
+@@ -72,6 +72,15 @@ enum class ThreadPriority {
+     Critical
+ };
+ 
++// If set, the running thread is written to this address of the game's memory whenever a thread resumes, like
++// libultra's __osRunningThread (for games that read that variable). Indy64 addition.
++void set_running_thread_address(PTR(PTR(OSThread)) address);
++// Debugging aid: prints which game threads are blocked on which message queues. Indy64 addition.
++void debug_dump_waits(RDRAM_ARG FILE* f);
++// Debugging aid: called on every message queue send ('S'), dropped non-blocking send ('D') and receive ('R'), with the
++// priority of the calling game thread. Indy64 addition.
++using MesgQueueTraceCallback = void (*)(RDRAM_ARG PTR(OSMesgQueue) mq, OSMesg msg, char kind, int priority);
++void set_mesg_queue_trace_callback(MesgQueueTraceCallback callback);
+ void set_native_thread_name(const std::string& name);
+ void set_native_thread_priority(ThreadPriority pri);
+ PTR(OSThread) this_thread();
+@@ -99,6 +108,13 @@ void init_audio();
+ void set_audio_frequency(uint32_t freq);
+ void queue_audio_buffer(RDRAM_ARG PTR(s16) audio_data, uint32_t byte_count);
+ uint32_t get_remaining_audio_bytes();
++// Posts the game's AI event right now; false if the game has not registered one yet.
++bool send_ai_event();
++// Starts a thread that sends AI events at the pace the audio is played, like the AI interrupt does.
++void start_ai_thread();
++// Called when the game's audio task refills buffers (Indy64: OSTask data_size of the MusyX task), so the AI thread
++// does not run ahead of the refills.
++void notify_audio_refill(uint32_t buffers);
+ 
+ struct audio_callbacks_t {
+     using queue_samples_t = void(int16_t*, size_t);
+diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
+index 3198be0..d912246 100644
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -1,8 +1,25 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
++#include <algorithm>
++#include <atomic>
+ #include <cassert>
++#include <chrono>
++#include <thread>
+ 
+ static uint32_t sample_rate = 48000;
++static std::atomic<uint32_t> frames_per_buffer = 192;
++// AI events sent since the game's audio task last refilled buffers (see start_ai_thread). Indiana Jones (MusyX) uses a
++// ring of 8 buffers, so the 8th event without a refill would hand over a stale one.
++static std::atomic<int32_t> unrefilled_events = 0;
++static constexpr int32_t max_unrefilled_events = 7;
++static std::atomic<std::chrono::steady_clock::time_point> last_refill{ std::chrono::steady_clock::now() };
++
++void ultramodern::notify_audio_refill(uint32_t buffers) {
++    last_refill = std::chrono::steady_clock::now();
++    int32_t current = unrefilled_events.load();
++    while (!unrefilled_events.compare_exchange_weak(current, std::max<int32_t>(0, current - int32_t(buffers)))) {
++    }
++}
+ 
+ static ultramodern::audio_callbacks_t audio_callbacks;
+ 
+@@ -33,6 +50,59 @@ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_
+     if (sample_count > 0 && audio_callbacks.queue_samples) {
+         audio_callbacks.queue_samples(TO_PTR(int16_t, audio_data_), sample_count);
+     }
++    if (byte_count >= 4) {
++        frames_per_buffer = byte_count / 4;
++    }
++}
++
++// Games that refill the AI from its interrupt (Indiana Jones: MusyX hands over one 192-frame buffer per AI event) need
++// the event at the pace the hardware would raise it: once per buffer played, i.e. every frames_per_buffer /
++// sample_rate seconds. Bursts of events (or one per VI) make the game hand over buffers its microcode has not
++// refilled yet, which repeats short pieces (stutter). The pace is corrected only when the host queue drifts far.
++void ultramodern::start_ai_thread() {
++    std::thread([]() {
++        using clock = std::chrono::steady_clock;
++        auto next_tick = clock::now();
++        for (;;) {
++            if (!ultramodern::is_game_started() || (sample_rate == 0)) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(5));
++                next_tick = clock::now();
++                continue;
++            }
++
++            const auto period = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(double(frames_per_buffer) / double(sample_rate)));
++            next_tick += period;
++            std::this_thread::sleep_until(next_tick);
++
++            // Queue level in milliseconds of game audio.
++            const uint64_t queued_ms = uint64_t(get_remaining_audio_bytes()) / (2 * sizeof(int16_t)) * 1000 / sample_rate;
++            if (queued_ms > 120) {
++                continue; // The host plays slower than our clock: let the queue drain a little.
++            }
++
++            // The game refills its ring of buffers only when its audio task runs. If that task has been held up (by
++            // other game threads or the graphics), more events would make it hand over buffers it has not refilled
++            // yet, i.e. repeat the last ~70 ms in a loop. Hold back and let the host queue bridge the gap instead.
++            // A stall of more than 200 ms is not bridged anyway; then carry on rather than stay silent.
++            if (unrefilled_events >= max_unrefilled_events) {
++                if (clock::now() - last_refill.load() < std::chrono::milliseconds(200)) {
++                    continue;
++                }
++                unrefilled_events = 0;
++            }
++            if (send_ai_event()) {
++                unrefilled_events++;
++            }
++            if ((queued_ms < 10) && (unrefilled_events < max_unrefilled_events) && send_ai_event()) {
++                unrefilled_events++; // Ran nearly dry (e.g. after a stall): catch up by one buffer.
++            }
++
++            // After a long stall do not fire a burst of missed ticks.
++            if (clock::now() - next_tick > std::chrono::milliseconds(100)) {
++                next_tick = clock::now();
++            }
++        }
++    }).detach();
+ }
+ 
+ // For SDL2
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index 090cc42..ef3afab 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -105,7 +105,19 @@ static struct {
+             regs.VI_X_SCALE_REG = common_regs->xScale; // TODO implement osViSetXScale
+             regs.VI_Y_SCALE_REG = yScale; // TODO implement osViSetYScale
+             regs.VI_STATUS_REG = next_state->control;
+-            
++
++            // Bring-up trace (Indy64): VI register sets whenever the mode-related values change.
++            {
++                static uint32_t last_key[5] = {};
++                const uint32_t key[5] = { regs.VI_WIDTH_REG, regs.VI_X_SCALE_REG, regs.VI_H_START_REG, regs.VI_Y_SCALE_REG, regs.VI_STATUS_REG };
++                if (memcmp(key, last_key, sizeof(key)) != 0) {
++                    memcpy(last_key, key, sizeof(key));
++                    fprintf(stderr, "[vi] regs width %u xscale %08X hstart %08X yscale %08X vstart %08X status %08X origin %08X field %d\n",
++                        regs.VI_WIDTH_REG, regs.VI_X_SCALE_REG, regs.VI_H_START_REG, regs.VI_Y_SCALE_REG, regs.VI_V_START_REG,
++                        regs.VI_STATUS_REG, regs.VI_ORIGIN_REG, field);
++                }
++            }
++
+             // Swap VI states.
+             cur_state ^= 1;
+             *get_next_state() = *get_cur_state();
+@@ -243,10 +255,7 @@ void vi_thread_func() {
+                 }
+                 remaining_retraces = cur_state->retrace_count;
+             }
+-            if (events_context.ai.mq != NULLPTR) {
+-                // Send a message to the VI queue, and do not set it to be requeued if the queue was full for the same reason as the VI message above.
+-                ultramodern::enqueue_external_message(events_context.ai.mq, events_context.ai.msg, false, false);
+-            }
++            // AI events come from the AI thread (audio.cpp) at the pace the audio is played, not once per VI.
+         }
+ 
+         if (events_callbacks.vi_callback != nullptr) {
+@@ -255,6 +264,15 @@ void vi_thread_func() {
+     }
+ }
+ 
++bool ultramodern::send_ai_event() {
++    std::lock_guard lock{ events_context.message_mutex };
++    if (events_context.ai.mq != NULLPTR) {
++        ultramodern::enqueue_external_message(events_context.ai.mq, events_context.ai.msg, false, false);
++        return true;
++    }
++    return false;
++}
++
+ void sp_complete() {
+     uint8_t* rdram = events_context.rdram;
+     std::lock_guard lock{ events_context.message_mutex };
+@@ -359,11 +377,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+         if (events_context.action_queue.wait_dequeue_timed(action, 1ms)) {
+             // Determine the action type and act on it
+             if (const auto* task_action = std::get_if<SpTaskAction>(&action)) {
+-                // Tell the game that the RSP completed instantly. This will allow it to queue other task types, but it won't
+-                // start another graphics task until the RDP is also complete. Games usually preserve the RSP inputs until the RDP
+-                // is finished as well, so sending this early shouldn't be an issue in most cases.
+-                // If this causes issues then the logic can be replaced with responding to yield requests.
+-                sp_complete();
++                // Indy64: the RSP completion is sent once the display list was parsed below, not right away. Indiana Jones
++                // reuses its graphics buffer (matrices at 0x700000) for CPU-generated image data as soon as the RSP is
++                // done, which overwrote matrices the renderer had not read yet.
+                 ultramodern::measure_input_latency();
+ 
+                 PTR(u64) displaylist = task_action->task.t.data_ptr;
+@@ -373,6 +389,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 renderer_context->send_dl(&task_action->task);
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
++                sp_complete();
+                 dp_complete();
+                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+                 ultramodern::extensions::on_displaylist_parsed(displaylist);
+@@ -457,6 +474,13 @@ void set_dummy_vi(bool odd) {
+ extern "C" void osViSwapBuffer(RDRAM_ARG PTR(void) frameBufPtr) {
+     std::lock_guard lock{ events_context.message_mutex };
+     events_context.vi.get_next_state()->framebuffer = frameBufPtr;
++    // Bring-up trace (Indy64): framebuffer changes.
++    static PTR(void) last_fb = 0;
++    static int fb_traces = 0;
++    if (frameBufPtr != last_fb && fb_traces++ < 200) {
++        fprintf(stderr, "[vi] swap %08X\n", (uint32_t)frameBufPtr);
++        last_fb = frameBufPtr;
++    }
+ }
+ 
+ extern "C" void osViSetMode(RDRAM_ARG PTR(OSViMode) mode_) {
+@@ -465,6 +489,10 @@ extern "C" void osViSetMode(RDRAM_ARG PTR(OSViMode) mode_) {
+     ViState* next_state = events_context.vi.get_next_state();
+     next_state->mode = mode;
+     next_state->control = next_state->mode->comRegs.ctrl;
++    // libultra's osViSetMode replaces the state flags (state = VI_STATE_MODE_UPDATED), which also ends osViBlack.
++    // Indy64 blanks the screen at boot and relies on this to show it again (Indy64 addition).
++    next_state->state = 0;
++    fprintf(stderr, "[vi] set mode type %u ctrl %08X width %u\n", (unsigned)mode->type, (unsigned)mode->comRegs.ctrl, (unsigned)mode->comRegs.width);
+ }
+ 
+ #define OS_VI_GAMMA_ON          0x0001
+@@ -516,6 +544,7 @@ extern "C" void osViSetSpecialFeatures(uint32_t func) {
+ }
+ 
+ extern "C" void osViBlack(uint8_t active) {
++    fprintf(stderr, "[vi] black %u\n", (unsigned)active);
+     std::lock_guard lock{ events_context.message_mutex };
+     ViState* next_state = events_context.vi.get_next_state();
+     uint32_t* state_out = &next_state->state;
+@@ -538,12 +567,14 @@ extern "C" void osViRepeatLine(uint8_t active) {
+ }
+ 
+ extern "C" void osViSetXScale(float scale) {
++    fprintf(stderr, "[vi] x scale %f\n", scale);
+     if (scale != 1.0f) {
+         assert(false);
+     }
+ }
+ 
+ extern "C" void osViSetYScale(float scale) {
++    fprintf(stderr, "[vi] y scale %f\n", scale);
+     if (scale != 1.0f) {
+         assert(false);
+     }
+@@ -560,6 +591,13 @@ extern "C" PTR(void) osViGetCurrentFramebuffer() {
+ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+     OSTask* task = TO_PTR(OSTask, task_);
+ 
++    // Indy64 bring-up trace: the first tasks of each type.
++    static std::atomic<int> traced_tasks{ 0 };
++    if (traced_tasks.fetch_add(1) < 12) {
++        fprintf(stderr, "[task] type %u ucode %08X data %08X data_ptr %08X size %X\n", task->t.type, (uint32_t)task->t.ucode,
++            (uint32_t)task->t.ucode_data, (uint32_t)task->t.data_ptr, task->t.data_size);
++    }
++
+     // Send gfx tasks to the graphics action queue
+     if (task->t.type == M_GFXTASK) {
+         events_context.action_queue.enqueue(SpTaskAction{ *task });
+@@ -615,6 +653,7 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+     }
+ 
+     events_context.vi.thread = std::thread{ vi_thread_func };
++    ultramodern::start_ai_thread();
+ }
+ 
+ void ultramodern::join_event_threads() {
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index 961de3d..e4804c6 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -1,3 +1,6 @@
++#include <cstdio>
++#include <map>
++#include <mutex>
+ #include <thread>
+ 
+ #include "blockingconcurrentqueue.h"
+@@ -5,6 +8,48 @@
+ #include "ultramodern/ultra64.h"
+ #include "ultramodern/ultramodern.hpp"
+ 
++// Debugging aid (Indy64 addition): which game thread waits on which message queue.
++namespace {
++    struct WaitInfo {
++        PTR(OSMesgQueue) mq;
++        char kind;
++    };
++    std::mutex wait_mutex;
++    std::map<int32_t, WaitInfo> waits;
++
++    void note_wait(PTR(OSThread) t, PTR(OSMesgQueue) mq, char kind) {
++        std::lock_guard lock{ wait_mutex };
++        if (kind == 0) {
++            waits.erase(t);
++        }
++        else {
++            waits[t] = WaitInfo{ mq, kind };
++        }
++    }
++}
++
++static ultramodern::MesgQueueTraceCallback mq_trace_callback = nullptr;
++
++void ultramodern::set_mesg_queue_trace_callback(MesgQueueTraceCallback callback) {
++    mq_trace_callback = callback;
++}
++
++static void trace_mq(RDRAM_ARG PTR(OSMesgQueue) mq, OSMesg msg, char kind, bool external) {
++    if (mq_trace_callback != nullptr) {
++        mq_trace_callback(PASS_RDRAM mq, msg, kind, external ? -1 : TO_PTR(OSThread, ultramodern::this_thread())->priority);
++    }
++}
++
++void ultramodern::debug_dump_waits(RDRAM_ARG FILE* f) {
++    std::lock_guard lock{ wait_mutex };
++    for (const auto& [thread_ptr, info] : waits) {
++        const OSThread* t = TO_PTR(OSThread, thread_ptr);
++        const OSMesgQueue* mq = TO_PTR(OSMesgQueue, info.mq);
++        fprintf(f, "  thread %08X id %d pri %d %s mq %08X (%d/%d)\n", (uint32_t)thread_ptr, t->id, t->priority,
++            info.kind == 'R' ? "recv" : "send", (uint32_t)info.mq, mq->validCount, mq->msgCount);
++    }
++}
++
+ struct QueuedMessage {
+     PTR(OSMesgQueue) mq;
+     OSMesg mesg;
+@@ -33,6 +78,16 @@ void dequeue_external_messages(RDRAM_ARG1) {
+     }
+ }
+ 
++// Indy64: preemption point for long-running game loops that make no OS calls. Delivers pending external messages
++// (VI, AI, SP, timers) and switches to a woken thread of higher priority, as the console's interrupts would.
++extern "C" void preempt_point(RDRAM_ARG1) {
++    if (external_messages.size_approx() == 0) {
++        return;
++    }
++    dequeue_external_messages(PASS_RDRAM1);
++    ultramodern::check_running_queue(PASS_RDRAM1);
++}
++
+ void ultramodern::wait_for_external_message(RDRAM_ARG1) {
+     QueuedMessage to_send;
+     external_messages.wait_dequeue(to_send);
+@@ -77,6 +132,7 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+     if (!block) {
+         // If non-blocking, fail if the queue is full.
+         if (MQ_IS_FULL(mq)) {
++            trace_mq(PASS_RDRAM mq_, msg, 'D', false);
+             return false;
+         }
+     }
+@@ -84,9 +140,11 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+         // Otherwise, yield this thread until the queue has room.
+         while (MQ_IS_FULL(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on send\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
++            note_wait(ultramodern::this_thread(), mq_, 'S');
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_send), ultramodern::this_thread());
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
++        note_wait(ultramodern::this_thread(), mq_, 0);
+     }
+     
+     if (jam) {
+@@ -101,6 +159,7 @@ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
+         TO_PTR(OSMesg, mq->msg)[last] = msg;
+         mq->validCount++;
+     }
++    trace_mq(PASS_RDRAM mq_, msg, 'S', false);
+ 
+     // If any threads were blocked on receiving from this message queue, pop the first one and schedule it.
+     PTR(PTR(OSThread)) blocked_queue = GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv);
+@@ -122,15 +181,18 @@ bool do_recv(RDRAM_ARG PTR(OSMesgQueue) mq_, PTR(OSMesg) msg_, bool block) {
+         // Otherwise, yield this thread in a loop until the queue is no longer full
+         while (MQ_IS_EMPTY(mq)) {
+             debug_printf("[Message Queue] Thread %d is blocked on receive\n", TO_PTR(OSThread, ultramodern::this_thread())->id);
++            note_wait(ultramodern::this_thread(), mq_, 'R');
+             ultramodern::thread_queue_insert(PASS_RDRAM GET_MEMBER(OSMesgQueue, mq_, blocked_on_recv), ultramodern::this_thread());
+             ultramodern::run_next_thread_and_wait(PASS_RDRAM1);
+         }
++        note_wait(ultramodern::this_thread(), mq_, 0);
+     }
+ 
++    trace_mq(PASS_RDRAM mq_, TO_PTR(OSMesg, mq->msg)[mq->first], 'R', false);
+     if (msg_ != NULLPTR) {
+         *TO_PTR(OSMesg, msg_) = TO_PTR(OSMesg, mq->msg)[mq->first];
+     }
+-    
++
+     mq->first = (mq->first + 1) % mq->msgCount;
+     mq->validCount--;
+ 
+diff --git a/ultramodern/src/misc_ultra.cpp b/ultramodern/src/misc_ultra.cpp
+index 31fb226..835ee68 100644
+--- a/ultramodern/src/misc_ultra.cpp
++++ b/ultramodern/src/misc_ultra.cpp
+@@ -1,4 +1,7 @@
+ #include "ultramodern/ultra64.h"
++#include "ultramodern/tlb_mappings.hpp"
++
++#include <iterator>
+ 
+ #define K0BASE        0x80000000
+ #define K1BASE        0xA0000000
+@@ -15,8 +18,16 @@ u32 osVirtualToPhysical(PTR(void) addr) {
+     } else if (IS_KSEG1(addr_val)) {
+         return K1_TO_PHYS(addr_val);
+     } else {
+-        // TODO handle TLB mappings
+-        return (u32)addr_val;
++        // Fixed TLB mappings, see tlb_mappings.hpp. Later entries are more specific, so they are checked first.
++        const u32 addr32 = (u32)addr_val;
++        for (size_t i = std::size(ultramodern::tlb_mappings); i-- > 0;) {
++            const ultramodern::TlbMapping &mapping = ultramodern::tlb_mappings[i];
++            if ((addr32 >= mapping.virtual_address) && (addr32 - mapping.virtual_address < mapping.size)) {
++                return mapping.physical_address + (addr32 - mapping.virtual_address);
++            }
++        }
++
++        return addr32;
+     }
+ }
+ 
+diff --git a/ultramodern/src/scheduling.cpp b/ultramodern/src/scheduling.cpp
+index a22f747..8f2c690 100644
+--- a/ultramodern/src/scheduling.cpp
++++ b/ultramodern/src/scheduling.cpp
+@@ -42,6 +42,24 @@ extern "C" void yield_self(RDRAM_ARG1) {
+     ultramodern::check_running_queue(PASS_RDRAM1);
+ }
+ 
++// osYieldThread (Indy64 addition): like libultra, hand over to a ready thread of equal or higher priority and
++// otherwise return at once (the caller will block soon and let lower threads run). Only when no other thread is
++// ready at all (the idle loop) wait for the next external event, since external messages are only delivered while
++// a game thread waits for them; returning immediately there would spin forever.
++extern "C" void yield_to_ready_or_wait(RDRAM_ARG1) {
++    if (!ultramodern::thread_queue_empty(PASS_RDRAM ultramodern::running_queue)) {
++        OSThread* next_thread = TO_PTR(OSThread, ultramodern::thread_queue_peek(PASS_RDRAM ultramodern::running_queue));
++        OSThread* self = TO_PTR(OSThread, ultramodern::this_thread());
++        if (next_thread->priority >= self->priority) {
++            ultramodern::thread_queue_pop(PASS_RDRAM ultramodern::running_queue);
++            swap_to_thread(PASS_RDRAM next_thread);
++        }
++        return;
++    }
++
++    yield_self(PASS_RDRAM1);
++}
++
+ extern "C" void yield_self_1ms(RDRAM_ARG1) {
+     ultramodern::wait_for_external_message_timed(PASS_RDRAM1, 1);
+     ultramodern::check_running_queue(PASS_RDRAM1);
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 812c556..edc2a67 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include <cstdio>
+ #include <thread>
+ #include <cassert>
+@@ -146,6 +147,13 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
+ #endif
+ 
++// Address of the game's libultra __osRunningThread, kept up to date for games that read it directly (Indy64 addition).
++static std::atomic<int32_t> running_thread_address{ 0 };
++
++void ultramodern::set_running_thread_address(PTR(PTR(OSThread)) address) {
++    running_thread_address.store(address);
++}
++
+ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+     thread_context->running.wait();
+     // If this thread's context was replaced by another thread or deleted, destroy it again from its own context.
+@@ -153,6 +161,12 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+     if (TO_PTR(OSThread, ultramodern::this_thread())->context != thread_context) {
+         osDestroyThread(PASS_RDRAM NULLPTR);
+     }
++    // Only a thread that really resumes is the running one (a destroyed thread is woken just to terminate itself,
++    // while the thread that destroyed it keeps running).
++    const int32_t running_address = running_thread_address.load();
++    if (running_address != 0) {
++        *TO_PTR(PTR(OSThread), running_address) = thread_self;
++    }
+ }
+ 
+ void resume_thread(OSThread* t) {
